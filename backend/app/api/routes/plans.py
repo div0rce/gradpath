@@ -3,18 +3,21 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.enums import CertificationState
-from app.models import AuditLog, CatalogSnapshot, DegreeAuditRequirement, DegreePlan, ProgramVersion
+from app.enums import CertificationState, TermSeason
+from app.models import AuditLog, CatalogSnapshot, DegreeAuditRequirement, DegreePlan, PlanItem, ProgramVersion, Term
 from app.schemas import (
     AuditLatestResponse,
     AuditRequirementResult,
     CreatePlanRequest,
     CreatePlanResponse,
     FinalizeResponse,
+    PlanDetailResponse,
+    PlanItemDetailResponse,
+    PlanTermResponse,
     ReadyResponse,
     RecomputeAuditResponse,
     UpdatePlanItemRequest,
@@ -51,6 +54,81 @@ def create_plan(req: CreatePlanRequest, db: Session = Depends(get_db)) -> Create
         pinned_catalog_snapshot_id=plan.pinned_catalog_snapshot_id,
         pinned_requirement_set_id=plan.pinned_requirement_set_id,
     )
+
+
+@router.get("/{plan_id}", response_model=PlanDetailResponse)
+def get_plan(plan_id: str, db: Session = Depends(get_db)) -> PlanDetailResponse:
+    plan = db.get(DegreePlan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan not found")
+
+    # Maintainer note:
+    # Plan item IDs are immutable and scoped to a single plan.
+    # Cross-plan reuse is rejected in the PUT mutation path.
+    items = db.execute(
+        select(PlanItem)
+        .where(PlanItem.plan_id == plan_id)
+        .order_by(PlanItem.term_id.asc(), PlanItem.position.asc())
+    ).scalars().all()
+
+    return PlanDetailResponse(
+        plan_id=plan.id,
+        user_id=plan.user_id,
+        name=plan.name,
+        program_version_id=plan.program_version_id,
+        pinned_catalog_snapshot_id=plan.pinned_catalog_snapshot_id,
+        pinned_requirement_set_id=plan.pinned_requirement_set_id,
+        certification_state=plan.certification_state.value,
+        items=[
+            PlanItemDetailResponse(
+                id=i.id,
+                term_id=i.term_id,
+                position=i.position,
+                raw_input=i.raw_input,
+                canonical_code=i.canonical_code,
+                course_id=i.course_id,
+                plan_item_status=i.plan_item_status.value,
+                completion_status=i.completion_status,
+                validation_reason=i.validation_reason,
+                validation_meta=i.validation_meta,
+                last_validated_at=i.last_validated_at,
+            )
+            for i in items
+        ],
+    )
+
+
+@router.get("/{plan_id}/terms", response_model=list[PlanTermResponse])
+def get_plan_terms(plan_id: str, db: Session = Depends(get_db)) -> list[PlanTermResponse]:
+    plan = db.get(DegreePlan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan not found")
+
+    # Ordering contract for planner columns:
+    # (year ASC, season order, code ASC) where season order is WINTER, SPRING, SUMMER, FALL.
+    season_rank = case(
+        (Term.season == TermSeason.WINTER, 1),
+        (Term.season == TermSeason.SPRING, 2),
+        (Term.season == TermSeason.SUMMER, 3),
+        (Term.season == TermSeason.FALL, 4),
+        else_=99,
+    )
+    rows = db.execute(
+        select(Term)
+        .where(Term.catalog_snapshot_id == plan.pinned_catalog_snapshot_id)
+        .order_by(Term.year.asc(), season_rank.asc(), Term.code.asc())
+    ).scalars().all()
+
+    return [
+        PlanTermResponse(
+            id=t.id,
+            campus=t.campus,
+            code=t.code,
+            year=t.year,
+            season=t.season,
+        )
+        for t in rows
+    ]
 
 
 @router.post("/{plan_id}/items:validate", response_model=ValidatePlanItemResponse)
