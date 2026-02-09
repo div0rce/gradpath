@@ -99,6 +99,27 @@ npm install
 NEXT_PUBLIC_API_BASE=http://localhost:8000 npm run dev
 ```
 
+### Phase 4 SOC automation
+
+Run a single unattended SOC ingest job:
+
+```bash
+cd backend
+source .venv/bin/activate
+python scripts/run_soc_ingest.py --campus NB --term-code 2025SU
+```
+
+Run multiple jobs from config:
+
+```bash
+cd backend
+source .venv/bin/activate
+python scripts/run_soc_ingest.py --config scripts/soc_jobs.json --output-jsonl var/soc_ingest_runs.jsonl
+```
+
+`run_soc_ingest.py` executes jobs sequentially, continues after failures, and exits non-zero if any job fails.
+Phase 4 never auto-promotes snapshots; promotion remains manual/policy-gated.
+
 ## Troubleshooting
 
 - `POST /v1/plans/{planId}:ready` returns 404:
