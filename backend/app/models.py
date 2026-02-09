@@ -53,6 +53,7 @@ class CatalogSnapshot(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     source: Mapped[CatalogSource] = mapped_column(SAEnum(CatalogSource), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     checksum: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[CatalogSnapshotStatus] = mapped_column(SAEnum(CatalogSnapshotStatus), nullable=False)
