@@ -120,6 +120,23 @@ python scripts/run_soc_ingest.py --config scripts/soc_jobs.json --output-jsonl v
 `run_soc_ingest.py` executes jobs sequentially, continues after failures, and exits non-zero if any job fails.
 Phase 4 never auto-promotes snapshots; promotion remains manual/policy-gated.
 
+Generate closeout evidence artifacts (example):
+
+```bash
+cd backend
+source .venv/bin/activate
+python scripts/run_soc_ingest.py --campus NB --term-code 2025SU --output-jsonl var/phase4_evidence/run1.jsonl
+python scripts/run_soc_ingest.py --campus NB --term-code 2025SU --output-jsonl var/phase4_evidence/run2.jsonl
+```
+
+Inspect latest slice status and recent failures from JSONL logs:
+
+```bash
+cd backend
+source .venv/bin/activate
+python scripts/soc_status.py --jsonl var/soc_ingest_runs.jsonl --campus NB --term-code 2025SU --last-n-failures 5
+```
+
 ## Troubleshooting
 
 - `POST /v1/plans/{planId}:ready` returns 404:
