@@ -191,20 +191,84 @@ class DepartmentCSVAdapter(RegistrarFeedAdapter):
 
 
 class SOCExportAdapter(RegistrarFeedAdapter):
+    def __init__(self, *, raw_payload: dict[str, Any] | None, ingest_source: str):
+        self._raw_payload = raw_payload
+        self._ingest_source = ingest_source
+
     def fetch_candidate_payload(self) -> dict[str, Any]:
-        # Placeholder for scraping/export pull logic.
-        return {"raw": []}
+        if self._raw_payload is None:
+            raise ValueError({"error_code": "SOC_FETCH_FAILED", "message": "No SOC payload provided"})
+        return self._raw_payload
 
     def validate_schema(self, payload: dict[str, Any]) -> None:
-        if "raw" not in payload:
-            raise ValueError("Invalid SOC payload")
+        allowed_top_keys = {"terms", "offerings", "metadata"}
+        unexpected = sorted(set(payload.keys()) - allowed_top_keys)
+        if unexpected:
+            raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "unexpected_keys": unexpected})
+
+        if "terms" not in payload or not isinstance(payload["terms"], list):
+            raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "terms"})
+        if "offerings" not in payload or not isinstance(payload["offerings"], list):
+            raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "offerings"})
+
+        metadata = payload.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "metadata"})
+        allowed_metadata = {"source_urls", "fetched_at", "raw_hash", "parse_warnings"}
+        unexpected_meta = sorted(set(metadata.keys()) - allowed_metadata)
+        if unexpected_meta:
+            raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "unexpected_metadata": unexpected_meta})
+
+        for idx, row in enumerate(payload["terms"], start=1):
+            if not isinstance(row, dict):
+                raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "terms", "index": idx})
+            expected = {"term_code", "campus"}
+            if set(row.keys()) != expected:
+                raise ValueError(
+                    {"error_code": "SOC_SCHEMA_VIOLATION", "field": "terms", "index": idx, "expected": sorted(expected)}
+                )
+            if not row["term_code"] or not row["campus"]:
+                raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "terms", "index": idx})
+
+        for idx, row in enumerate(payload["offerings"], start=1):
+            if not isinstance(row, dict):
+                raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "offerings", "index": idx})
+            expected = {"term_code", "campus", "course_code", "offered"}
+            if set(row.keys()) != expected:
+                raise ValueError(
+                    {
+                        "error_code": "SOC_SCHEMA_VIOLATION",
+                        "field": "offerings",
+                        "index": idx,
+                        "expected": sorted(expected),
+                    }
+                )
+            if not row["term_code"] or not row["campus"] or not row["course_code"]:
+                raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "offerings", "index": idx})
+            if not isinstance(row["offered"], bool):
+                raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "offerings", "index": idx})
 
     def to_canonical_rows(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.validate_schema(payload)
-        raise NotImplementedError("SOC normalization rules are institution-specific")
+        return {
+            "terms": [
+                {"term_code": str(row["term_code"]), "campus": str(row["campus"])}
+                for row in payload["terms"]
+            ],
+            "offerings": [
+                {
+                    "term_code": str(row["term_code"]),
+                    "campus": str(row["campus"]),
+                    "course_code": str(row["course_code"]),
+                    "offered": bool(row["offered"]),
+                }
+                for row in payload["offerings"]
+            ],
+            "metadata": payload.get("metadata") or {},
+        }
 
     def source_metadata(self) -> dict[str, Any]:
-        return {"adapter": "SOCExportAdapter"}
+        return {"adapter": "SOCExportAdapter", "ingest_source": self._ingest_source}
 
 
 class SISAdapter(RegistrarFeedAdapter):
