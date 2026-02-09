@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.services.soc_pull import validate_soc_raw_payload
+
 
 class RegistrarFeedAdapter(ABC):
     @abstractmethod
@@ -201,52 +203,7 @@ class SOCExportAdapter(RegistrarFeedAdapter):
         return self._raw_payload
 
     def validate_schema(self, payload: dict[str, Any]) -> None:
-        allowed_top_keys = {"terms", "offerings", "metadata"}
-        unexpected = sorted(set(payload.keys()) - allowed_top_keys)
-        if unexpected:
-            raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "unexpected_keys": unexpected})
-
-        if "terms" not in payload or not isinstance(payload["terms"], list):
-            raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "terms"})
-        if "offerings" not in payload or not isinstance(payload["offerings"], list):
-            raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "offerings"})
-
-        metadata = payload.get("metadata") or {}
-        if not isinstance(metadata, dict):
-            raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "metadata"})
-        allowed_metadata = {"source_urls", "fetched_at", "raw_hash", "parse_warnings"}
-        unexpected_meta = sorted(set(metadata.keys()) - allowed_metadata)
-        if unexpected_meta:
-            raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "unexpected_metadata": unexpected_meta})
-
-        for idx, row in enumerate(payload["terms"], start=1):
-            if not isinstance(row, dict):
-                raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "terms", "index": idx})
-            expected = {"term_code", "campus"}
-            if set(row.keys()) != expected:
-                raise ValueError(
-                    {"error_code": "SOC_SCHEMA_VIOLATION", "field": "terms", "index": idx, "expected": sorted(expected)}
-                )
-            if not row["term_code"] or not row["campus"]:
-                raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "terms", "index": idx})
-
-        for idx, row in enumerate(payload["offerings"], start=1):
-            if not isinstance(row, dict):
-                raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "offerings", "index": idx})
-            expected = {"term_code", "campus", "course_code", "offered"}
-            if set(row.keys()) != expected:
-                raise ValueError(
-                    {
-                        "error_code": "SOC_SCHEMA_VIOLATION",
-                        "field": "offerings",
-                        "index": idx,
-                        "expected": sorted(expected),
-                    }
-                )
-            if not row["term_code"] or not row["campus"] or not row["course_code"]:
-                raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "offerings", "index": idx})
-            if not isinstance(row["offered"], bool):
-                raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "field": "offerings", "index": idx})
+        validate_soc_raw_payload(payload)
 
     def to_canonical_rows(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.validate_schema(payload)
