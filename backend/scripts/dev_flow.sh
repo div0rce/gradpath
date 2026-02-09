@@ -14,8 +14,8 @@ source .venv/bin/activate
 API="${API:-http://localhost:8000}"
 
 if ! curl -fsS "$API/health" >/dev/null; then
-  echo "API is not reachable at $API. Start it first:"
-  echo "  cd backend && source .venv/bin/activate && uvicorn app.main:app --reload --port 8000"
+  echo "API not reachable at $API/health" >&2
+  echo "Start uvicorn first." >&2
   exit 1
 fi
 
@@ -49,7 +49,9 @@ curl -fsS -X PUT "$API/v1/plans/$PLAN_ID/items/$ITEM2" \
 
 echo
 echo "POST :ready..."
-curl -fsS -X POST "$API/v1/plans/$PLAN_ID:ready" | python -m json.tool
+READY_JSON=$(curl -fsS -X POST "$API/v1/plans/$PLAN_ID:ready")
+echo "$READY_JSON" | python -m json.tool
+CATALOG_SNAPSHOT_ID=$(printf '%s' "$READY_JSON" | python -c 'import sys,json; print(json.load(sys.stdin)["catalog_snapshot_id"])')
 
 echo
 echo "POST /finalize..."
@@ -60,3 +62,4 @@ echo
 echo "Done:"
 echo "  PLAN_ID=$PLAN_ID"
 echo "  API=$API"
+echo "CERTIFIED plan=$PLAN_ID snapshot=$CATALOG_SNAPSHOT_ID program_version=$PROGRAM_VERSION_ID"
