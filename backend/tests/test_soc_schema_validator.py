@@ -42,7 +42,7 @@ def test_validate_soc_raw_payload_requires_parse_warnings_list_of_strings():
                 "offerings": [
                     {"term_code": "2025SU", "campus": "NB", "course_code": "14:540:100", "offered": True},
                 ],
-                "metadata": {"source_urls": [], "parse_warnings": [1]},
+                "metadata": {"source_urls": [], "parse_warnings": [1], "fetched_at": "2026-02-09T00:00:00Z"},
             }
         )
     assert exc_info.value.args[0]["error_code"] == "SOC_SCHEMA_VIOLATION"
@@ -56,7 +56,21 @@ def test_validate_soc_raw_payload_requires_offered_bool():
                 "offerings": [
                     {"term_code": "2025SU", "campus": "NB", "course_code": "14:540:100", "offered": "yes"},
                 ],
-                "metadata": {"source_urls": [], "parse_warnings": []},
+                "metadata": {"source_urls": [], "parse_warnings": [], "fetched_at": "2026-02-09T00:00:00Z"},
+            }
+        )
+    assert exc_info.value.args[0]["error_code"] == "SOC_SCHEMA_VIOLATION"
+
+
+def test_validate_soc_raw_payload_requires_non_empty_fetched_at():
+    with pytest.raises(ValueError) as exc_info:
+        validate_soc_raw_payload(
+            {
+                "terms": [{"term_code": "2025SU", "campus": "NB"}],
+                "offerings": [
+                    {"term_code": "2025SU", "campus": "NB", "course_code": "14:540:100", "offered": True},
+                ],
+                "metadata": {"source_urls": [], "parse_warnings": [], "fetched_at": "  "},
             }
         )
     assert exc_info.value.args[0]["error_code"] == "SOC_SCHEMA_VIOLATION"
