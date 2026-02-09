@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.services.soc_pull import SocFetchResult
-from app.services.soc_runner import fetch_raw_payload_for_slice, stage_soc_slice
+from app.services.soc_runner import ATTEMPT_KEYS, fetch_raw_payload_for_slice, stage_soc_slice
 
 
 class _FakeAdapter:
@@ -97,6 +97,8 @@ def test_fetch_raw_payload_for_slice_raises_when_all_sources_fail_or_incomplete(
     detail = exc_info.value.args[0]
     assert detail["error_code"] == "SOC_FETCH_FAILED"
     assert len(detail["attempts"]) == 2
+    for attempt in detail["attempts"]:
+        assert set(attempt.keys()) == ATTEMPT_KEYS
 
 
 def test_fetch_raw_payload_for_slice_blocks_when_complete_but_reason_present():
@@ -119,6 +121,7 @@ def test_fetch_raw_payload_for_slice_blocks_when_complete_but_reason_present():
     detail = exc_info.value.args[0]
     assert detail["error_code"] == "UPSTREAM_INCOMPLETE"
     assert detail["attempts"][0]["completeness_reason"] == "UPSTREAM_INCOMPLETE"
+    assert set(detail["attempts"][0].keys()) == ATTEMPT_KEYS
 
 
 def test_fetch_raw_payload_for_slice_normalizes_missing_reason_to_unknown():
@@ -141,6 +144,62 @@ def test_fetch_raw_payload_for_slice_normalizes_missing_reason_to_unknown():
     detail = exc_info.value.args[0]
     assert detail["error_code"] == "UPSTREAM_INCOMPLETE"
     assert detail["attempts"][0]["completeness_reason"] == "UNKNOWN_COMPLETENESS"
+    assert set(detail["attempts"][0].keys()) == ATTEMPT_KEYS
+
+
+def test_fetch_raw_payload_for_slice_does_not_canonicalize_non_stageable(monkeypatch):
+    adapters = {
+        "WEBREG_PUBLIC": _FakeAdapter(
+            result=SocFetchResult(
+                raw_payload=_complete_payload(),
+                is_complete=False,
+                completeness_reason="PAGINATION_UNCERTAIN",
+            )
+        ),
+    }
+
+    called = {"value": False}
+
+    def _fail_if_called(*_args, **_kwargs):
+        called["value"] = True
+        raise AssertionError("canonicalize_soc_raw_payload must not run for non-stageable results")
+
+    monkeypatch.setattr("app.services.soc_runner.canonicalize_soc_raw_payload", _fail_if_called)
+
+    with pytest.raises(ValueError) as exc_info:
+        fetch_raw_payload_for_slice(
+            campus="NB",
+            term_code="2025SU",
+            source_priority=["WEBREG_PUBLIC"],
+            adapters=adapters,
+        )
+    detail = exc_info.value.args[0]
+    assert detail["error_code"] == "UPSTREAM_INCOMPLETE"
+    assert called["value"] is False
+
+
+def test_fetch_raw_payload_for_slice_classifies_schema_violation():
+    bad_payload = {
+        "terms": [{"term_code": "2025SU", "campus": "NB"}],
+        "offerings": [{"term_code": "2025SU", "campus": "NB", "course_code": "14:540:100", "offered": "yes"}],
+        "metadata": {"source_urls": [], "parse_warnings": [], "fetched_at": "2026-02-09T00:00:00Z"},
+    }
+    adapters = {
+        "WEBREG_PUBLIC": _FakeAdapter(
+            result=SocFetchResult(raw_payload=bad_payload, is_complete=True, completeness_reason=None)
+        ),
+    }
+    with pytest.raises(ValueError) as exc_info:
+        fetch_raw_payload_for_slice(
+            campus="NB",
+            term_code="2025SU",
+            source_priority=["WEBREG_PUBLIC"],
+            adapters=adapters,
+        )
+    detail = exc_info.value.args[0]
+    assert detail["error_code"] == "SOC_FETCH_FAILED"
+    assert detail["attempts"][0]["error_code"] == "SOC_SCHEMA_VIOLATION"
+    assert set(detail["attempts"][0].keys()) == ATTEMPT_KEYS
 
 
 def test_stage_soc_slice_dry_run_parity_and_header():

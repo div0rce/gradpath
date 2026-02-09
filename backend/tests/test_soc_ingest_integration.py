@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
 from sqlalchemy import select
 
 from app.enums import CatalogSnapshotStatus
@@ -103,7 +104,7 @@ def test_runner_stage_then_noop_for_unchanged_payload(client):
     assert all(":promote" not in path for path in recording_client.paths)
 
 
-def test_runner_does_not_stage_when_source_is_incomplete():
+def test_runner_does_not_stage_when_source_is_incomplete(client):
     adapters = {
         "WEBREG_PUBLIC": _FakeAdapter(
             SocFetchResult(
@@ -117,14 +118,28 @@ def test_runner_does_not_stage_when_source_is_incomplete():
             )
         )
     }
-    try:
-        fetch_raw_payload_for_slice(
+    recording_client = _RecordingClient(client)
+
+    with pytest.raises(ValueError) as exc_info:
+        source_used, raw_payload = fetch_raw_payload_for_slice(
             campus="NB",
             term_code="2025SU",
             source_priority=["WEBREG_PUBLIC"],
             adapters=adapters,
         )
-    except ValueError as exc:
-        assert exc.args[0]["error_code"] == "UPSTREAM_INCOMPLETE"
-    else:
-        raise AssertionError("Expected SOC_FETCH_FAILED when source completeness is false")
+        stage_soc_slice(
+            api_base="",
+            campus="NB",
+            term_code="2025SU",
+            ingest_source=source_used,
+            raw_payload=raw_payload,
+            dry_run_first=False,
+            run_id="run-blocked",
+            client=recording_client,
+        )
+    detail = exc_info.value.args[0]
+    assert detail["error_code"] == "UPSTREAM_INCOMPLETE"
+    attempts = detail.get("attempts") or []
+    assert attempts[0]["error_code"] == "UPSTREAM_INCOMPLETE"
+    assert attempts[0]["completeness_reason"] == "UPSTREAM_INCOMPLETE"
+    assert recording_client.paths == []
