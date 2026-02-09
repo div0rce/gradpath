@@ -82,7 +82,9 @@ def validate_plan_item(
     term_id: str,
     position: int,
     raw_input: str,
+    completion_status: CompletionStatus,
 ) -> ValidationOutcome:
+    _ = completion_status
     plan = db.get(DegreePlan, plan_id)
     if not plan:
         raise ValueError("Plan not found")
