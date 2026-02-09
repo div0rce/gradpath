@@ -12,3 +12,4 @@ backend/.mypy_cache/
 backend/.ruff_cache/
 
 *.db
+git-diff.patch
