@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import re
 from typing import Any
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.enums import CatalogSnapshotStatus, RequirementSetStatus, RuleKind
+from app.enums import CatalogSnapshotStatus, CatalogSource, RequirementSetStatus, RuleKind
 from app.models import (
     ActiveCatalogSnapshot,
     CatalogSnapshot,
@@ -23,11 +24,15 @@ from app.models import (
 )
 from app.schemas import StageSnapshotRequest
 from app.services.rule_engine import validate_rule_schema
+from app.services.soc_checksum import SocResolvedOffering
 
 
 @dataclass
 class ActiveSnapshotDetails:
     snapshot: CatalogSnapshot
+
+
+SOC_CODE_SPACE_RE = re.compile(r"\s+")
 
 
 def _stage_validation_error(errors: list[dict[str, Any]]) -> None:
@@ -340,6 +345,208 @@ def get_active_snapshot(db: Session) -> ActiveSnapshotDetails:
         raise ValueError("Active snapshot record is invalid")
 
     return ActiveSnapshotDetails(snapshot=snapshot)
+
+
+def get_active_published_snapshot(db: Session) -> CatalogSnapshot:
+    active = get_active_snapshot(db).snapshot
+    if active.status != CatalogSnapshotStatus.PUBLISHED:
+        raise ValueError({"error_code": "SOC_BASELINE_REQUIRED"})
+    return active
+
+
+def get_latest_published_soc_slice_snapshot(db: Session, term_id: str) -> CatalogSnapshot | None:
+    term_id_str = str(term_id).lower()
+    # Preferred query shape for Postgres JSONB indexing:
+    # source_metadata->'soc_slice'->>'term_id' = :term_id
+    # Order + JSONB path are shared between dry-run and stage; do not fork.
+    base_stmt = (
+        select(CatalogSnapshot)
+        .where(
+            CatalogSnapshot.source == CatalogSource.SOC_SCRAPE,
+            CatalogSnapshot.status == CatalogSnapshotStatus.PUBLISHED,
+        )
+        .order_by(
+            func.coalesce(CatalogSnapshot.published_at, CatalogSnapshot.created_at).desc(),
+            CatalogSnapshot.created_at.desc(),
+            CatalogSnapshot.id.desc(),
+        )
+    )
+    try:
+        stmt = base_stmt.where(CatalogSnapshot.source_metadata["soc_slice"]["term_id"].as_string() == term_id_str)
+        return db.execute(stmt).scalars().first()
+    except Exception:
+        rows = db.execute(base_stmt).scalars().all()
+        for row in rows:
+            metadata = row.source_metadata or {}
+            soc_slice = metadata.get("soc_slice") or {}
+            if str(soc_slice.get("term_id", "")).lower() == term_id_str:
+                return row
+    return None
+
+
+def normalize_course_code(raw_code: str) -> tuple[str, bool]:
+    """Normalize SOC course code by removing whitespace and uppercasing."""
+    normalized = SOC_CODE_SPACE_RE.sub("", str(raw_code)).upper()
+    return normalized, normalized != str(raw_code)
+
+
+def write_soc_metadata(
+    *,
+    existing: dict[str, Any] | None,
+    term_id: str,
+    term_code: str,
+    campus: str,
+    checksum: str,
+    ingest_source: str,
+    parse_warnings_count: int,
+    unknown_courses_dropped_count: int,
+    zero_offerings: bool,
+) -> dict[str, Any]:
+    meta = dict(existing or {})
+    meta["soc_slice"] = {
+        "term_id": str(term_id).lower(),
+        "term_code": term_code,
+        "campus": campus,
+    }
+    meta["soc_slice_checksum"] = checksum
+    meta["ingest_source"] = ingest_source
+    meta["parse_warnings_count"] = parse_warnings_count
+    meta["unknown_courses_dropped_count"] = unknown_courses_dropped_count
+    meta["zero_offerings"] = zero_offerings
+    return meta
+
+
+def stage_soc_overlay_snapshot(
+    db: Session,
+    *,
+    baseline_snapshot: CatalogSnapshot,
+    baseline_term_id: str,
+    resolved_offerings: list[SocResolvedOffering],
+    checksum: str,
+    term_code: str,
+    campus: str,
+    ingest_source: str,
+    parse_warnings_count: int,
+    unknown_courses_dropped_count: int,
+    source_metadata: dict[str, Any] | None,
+) -> CatalogSnapshot:
+    new_snapshot = CatalogSnapshot(
+        source=CatalogSource.SOC_SCRAPE,
+        checksum=checksum,
+        status=CatalogSnapshotStatus.STAGED,
+        synced_at=datetime.utcnow(),
+        source_metadata=write_soc_metadata(
+            existing=source_metadata,
+            term_id=baseline_term_id,
+            term_code=term_code,
+            campus=campus,
+            checksum=checksum,
+            ingest_source=ingest_source,
+            parse_warnings_count=parse_warnings_count,
+            unknown_courses_dropped_count=unknown_courses_dropped_count,
+            zero_offerings=len(resolved_offerings) == 0,
+        ),
+    )
+    db.add(new_snapshot)
+    db.flush()
+
+    baseline_courses = db.execute(
+        select(Course).where(Course.catalog_snapshot_id == baseline_snapshot.id)
+    ).scalars().all()
+    baseline_terms = db.execute(select(Term).where(Term.catalog_snapshot_id == baseline_snapshot.id)).scalars().all()
+    baseline_rules = db.execute(
+        select(CourseRule).where(CourseRule.catalog_snapshot_id == baseline_snapshot.id)
+    ).scalars().all()
+    baseline_edges = db.execute(
+        select(PrerequisiteEdge).where(PrerequisiteEdge.catalog_snapshot_id == baseline_snapshot.id)
+    ).scalars().all()
+    baseline_offerings = db.execute(
+        select(CourseOffering).where(CourseOffering.catalog_snapshot_id == baseline_snapshot.id)
+    ).scalars().all()
+
+    course_id_map: dict[str, str] = {}
+    for c in baseline_courses:
+        copied = Course(
+            catalog_snapshot_id=new_snapshot.id,
+            code=c.code,
+            title=c.title,
+            credits=c.credits,
+            active=c.active,
+            category=c.category,
+        )
+        db.add(copied)
+        db.flush()
+        course_id_map[c.id] = copied.id
+
+    term_id_map: dict[str, str] = {}
+    for t in baseline_terms:
+        copied = Term(
+            catalog_snapshot_id=new_snapshot.id,
+            campus=t.campus,
+            code=t.code,
+            year=t.year,
+            season=t.season,
+            starts_at=t.starts_at,
+            ends_at=t.ends_at,
+        )
+        db.add(copied)
+        db.flush()
+        term_id_map[t.id] = copied.id
+
+    rule_id_map: dict[str, str] = {}
+    for r in baseline_rules:
+        copied = CourseRule(
+            catalog_snapshot_id=new_snapshot.id,
+            course_id=course_id_map[r.course_id],
+            kind=r.kind,
+            rule=r.rule,
+            rule_schema_version=r.rule_schema_version,
+            notes=r.notes,
+        )
+        db.add(copied)
+        db.flush()
+        rule_id_map[r.id] = copied.id
+
+    for e in baseline_edges:
+        db.add(
+            PrerequisiteEdge(
+                catalog_snapshot_id=new_snapshot.id,
+                course_id=course_id_map[e.course_id],
+                prereq_course_id=course_id_map[e.prereq_course_id],
+                derived_from_rule_id=rule_id_map[e.derived_from_rule_id] if e.derived_from_rule_id else None,
+            )
+        )
+
+    target_new_term_id = term_id_map[baseline_term_id]
+    for o in baseline_offerings:
+        if o.term_id == baseline_term_id:
+            continue
+        db.add(
+            CourseOffering(
+                catalog_snapshot_id=new_snapshot.id,
+                course_id=course_id_map[o.course_id],
+                term_id=term_id_map[o.term_id],
+                offered=o.offered,
+            )
+        )
+
+    inserted_course_ids: set[str] = set()
+    for row in resolved_offerings:
+        if row.course_id in inserted_course_ids:
+            continue
+        inserted_course_ids.add(row.course_id)
+        db.add(
+            CourseOffering(
+                catalog_snapshot_id=new_snapshot.id,
+                course_id=course_id_map[row.course_id],
+                term_id=target_new_term_id,
+                offered=True,
+            )
+        )
+
+    db.commit()
+    db.refresh(new_snapshot)
+    return new_snapshot
 
 
 def search_courses(db: Session, query: str) -> list[Course]:
