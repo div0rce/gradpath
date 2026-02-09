@@ -160,6 +160,15 @@ class FinalizeResponse(BaseModel):
     finalized_at: datetime
 
 
+class ReadyResponse(BaseModel):
+    plan_id: str
+    certification_state: str
+    audit_id: str
+    checked_at: datetime
+    catalog_snapshot_id: str
+    requirement_set_id: str
+
+
 class CourseSearchResponseItem(BaseModel):
     code: str
     title: str

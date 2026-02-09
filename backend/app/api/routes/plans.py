@@ -3,18 +3,19 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import and_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.enums import CertificationState, PlanItemStatus
-from app.models import CatalogSnapshot, DegreeAuditRequirement, DegreePlan, PlanItem, ProgramVersion
+from app.enums import CertificationState
+from app.models import AuditLog, CatalogSnapshot, DegreeAuditRequirement, DegreePlan, ProgramVersion
 from app.schemas import (
     AuditLatestResponse,
     AuditRequirementResult,
     CreatePlanRequest,
     CreatePlanResponse,
     FinalizeResponse,
+    ReadyResponse,
     RecomputeAuditResponse,
     UpdatePlanItemRequest,
     ValidatePlanItemRequest,
@@ -22,6 +23,7 @@ from app.schemas import (
 )
 from app.services.audit import latest_audit, recompute_audit
 from app.services.plans import upsert_plan_item
+from app.services.readiness import evaluate_plan_ready
 from app.services.validation import validate_plan_item
 
 router = APIRouter(prefix="/v1/plans", tags=["plans"])
@@ -60,6 +62,7 @@ def validate_item(plan_id: str, req: ValidatePlanItemRequest, db: Session = Depe
             term_id=req.term_id,
             position=req.position,
             raw_input=req.raw_input,
+            completion_status=req.completion_status,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -105,6 +108,50 @@ def put_item(
         catalog_snapshot_id=outcome.snapshot.id,
         synced_at=outcome.snapshot.synced_at,
         source=outcome.snapshot.source,
+    )
+
+
+@router.post("/{plan_id}:ready", response_model=ReadyResponse)
+def mark_ready(plan_id: str, db: Session = Depends(get_db)) -> ReadyResponse:
+    plan = db.get(DegreePlan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan not found")
+
+    try:
+        check = evaluate_plan_ready(db, plan_id=plan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    if not check.ok:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error_code": "PLAN_NOT_READY", "blockers": check.blockers},
+        )
+
+    plan.certification_state = CertificationState.READY
+    db.add(plan)
+    db.add(
+        AuditLog(
+            actor_user_id=plan.user_id,
+            action="PLAN_MARKED_READY",
+            resource_type="DegreePlan",
+            resource_id=plan.id,
+            meta={
+                "auditId": check.audit_id,
+                "catalogSnapshotId": plan.pinned_catalog_snapshot_id,
+                "requirementSetId": plan.pinned_requirement_set_id,
+            },
+        )
+    )
+    db.commit()
+
+    return ReadyResponse(
+        plan_id=plan.id,
+        certification_state=plan.certification_state.value,
+        audit_id=check.audit_id,
+        checked_at=check.checked_at,
+        catalog_snapshot_id=plan.pinned_catalog_snapshot_id,
+        requirement_set_id=plan.pinned_requirement_set_id,
     )
 
 
@@ -168,23 +215,37 @@ def finalize(plan_id: str, db: Session = Depends(get_db)) -> FinalizeResponse:
     if not plan:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan not found")
 
-    invalid_exists = db.execute(
-        select(PlanItem.id).where(
-            and_(PlanItem.plan_id == plan_id, PlanItem.plan_item_status == PlanItemStatus.INVALID)
-        )
-    ).first()
-    if invalid_exists:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Plan has invalid items")
-
-    outcome = recompute_audit(db, plan_id=plan_id)
-    if outcome.audit.has_unsupported_rules:
+    if plan.certification_state != CertificationState.READY:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Plan contains unsupported rule evaluations",
+            detail={"error_code": "PLAN_NOT_READY", "blockers": [{"code": "CERTIFY_REQUIRES_READY"}]},
+        )
+
+    try:
+        check = evaluate_plan_ready(db, plan_id=plan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    if not check.ok:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error_code": "PLAN_NOT_READY", "blockers": check.blockers},
         )
 
     plan.certification_state = CertificationState.CERTIFIED
     db.add(plan)
+    db.add(
+        AuditLog(
+            actor_user_id=plan.user_id,
+            action="PLAN_FINALIZED",
+            resource_type="DegreePlan",
+            resource_id=plan.id,
+            meta={
+                "auditId": check.audit_id,
+                "catalogSnapshotId": plan.pinned_catalog_snapshot_id,
+                "requirementSetId": plan.pinned_requirement_set_id,
+            },
+        )
+    )
     db.commit()
 
     return FinalizeResponse(
