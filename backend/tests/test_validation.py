@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.models import ProgramVersion, Term
+from app.models import PlanItem, ProgramVersion, Term
 from tests.helpers import stage_payload
 
 
@@ -78,3 +78,21 @@ def test_summer_same_term_no_fails_prereq(client, user_id):
     assert validate_second.status_code == 200
     assert validate_second.json()["is_valid"] is False
     assert validate_second.json()["reason"] == "PREREQ_MISSING"
+
+
+def test_completion_status_passed_through_validation_call(client, user_id):
+    plan_id, summer_id, _ = _seed_plan(client, user_id)
+    put = client.put(
+        f"/v1/plans/{plan_id}/items/item-1",
+        json={
+            "term_id": summer_id,
+            "position": 1,
+            "raw_input": "14:540:100",
+            "completion_status": "IN_PROGRESS",
+        },
+    )
+    assert put.status_code == 200
+
+    with SessionLocal() as db:
+        item = db.execute(select(PlanItem).where(PlanItem.id == "item-1")).scalars().one()
+        assert item.validation_meta["completionStatusAtValidation"] == "IN_PROGRESS"
