@@ -169,6 +169,39 @@ class ReadyResponse(BaseModel):
     requirement_set_id: str
 
 
+class PlanItemDetailResponse(BaseModel):
+    id: str
+    term_id: str
+    position: int
+    raw_input: str
+    canonical_code: str | None = None
+    course_id: str | None = None
+    plan_item_status: str
+    completion_status: CompletionStatus
+    validation_reason: ValidationReason | None = None
+    validation_meta: dict[str, Any] | None = None
+    last_validated_at: datetime | None = None
+
+
+class PlanDetailResponse(BaseModel):
+    plan_id: str
+    user_id: str
+    name: str
+    program_version_id: str
+    pinned_catalog_snapshot_id: str
+    pinned_requirement_set_id: str
+    certification_state: str
+    items: list[PlanItemDetailResponse]
+
+
+class PlanTermResponse(BaseModel):
+    id: str
+    campus: str
+    code: str
+    year: int
+    season: TermSeason
+
+
 class CourseSearchResponseItem(BaseModel):
     code: str
     title: str
