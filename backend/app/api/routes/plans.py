@@ -1,0 +1,194 @@
+from __future__ import annotations
+
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import and_, select
+from sqlalchemy.orm import Session
+
+from app.db import get_db
+from app.enums import CertificationState, PlanItemStatus
+from app.models import CatalogSnapshot, DegreeAuditRequirement, DegreePlan, PlanItem, ProgramVersion
+from app.schemas import (
+    AuditLatestResponse,
+    AuditRequirementResult,
+    CreatePlanRequest,
+    CreatePlanResponse,
+    FinalizeResponse,
+    RecomputeAuditResponse,
+    UpdatePlanItemRequest,
+    ValidatePlanItemRequest,
+    ValidatePlanItemResponse,
+)
+from app.services.audit import latest_audit, recompute_audit
+from app.services.plans import upsert_plan_item
+from app.services.validation import validate_plan_item
+
+router = APIRouter(prefix="/v1/plans", tags=["plans"])
+
+
+@router.post("", response_model=CreatePlanResponse)
+def create_plan(req: CreatePlanRequest, db: Session = Depends(get_db)) -> CreatePlanResponse:
+    version = db.get(ProgramVersion, req.program_version_id)
+    if not version:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Program version not found")
+
+    plan = DegreePlan(
+        user_id=req.user_id,
+        program_version_id=req.program_version_id,
+        pinned_catalog_snapshot_id=version.catalog_snapshot_id,
+        pinned_requirement_set_id=version.requirement_set_id,
+        name=req.name,
+    )
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+
+    return CreatePlanResponse(
+        plan_id=plan.id,
+        pinned_catalog_snapshot_id=plan.pinned_catalog_snapshot_id,
+        pinned_requirement_set_id=plan.pinned_requirement_set_id,
+    )
+
+
+@router.post("/{plan_id}/items:validate", response_model=ValidatePlanItemResponse)
+def validate_item(plan_id: str, req: ValidatePlanItemRequest, db: Session = Depends(get_db)) -> ValidatePlanItemResponse:
+    try:
+        outcome = validate_plan_item(
+            db,
+            plan_id=plan_id,
+            term_id=req.term_id,
+            position=req.position,
+            raw_input=req.raw_input,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return ValidatePlanItemResponse(
+        is_valid=outcome.is_valid,
+        reason=outcome.reason,
+        missing_prereqs=outcome.missing_prereqs,
+        canonical_code=outcome.canonical_code,
+        original_input=outcome.original_input,
+        catalog_snapshot_id=outcome.snapshot.id,
+        synced_at=outcome.snapshot.synced_at,
+        source=outcome.snapshot.source,
+    )
+
+
+@router.put("/{plan_id}/items/{item_id}", response_model=ValidatePlanItemResponse)
+def put_item(
+    plan_id: str,
+    item_id: str,
+    req: UpdatePlanItemRequest,
+    db: Session = Depends(get_db),
+) -> ValidatePlanItemResponse:
+    try:
+        _item, outcome = upsert_plan_item(
+            db,
+            plan_id=plan_id,
+            item_id=item_id,
+            term_id=req.term_id,
+            position=req.position,
+            raw_input=req.raw_input,
+            completion_status=req.completion_status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return ValidatePlanItemResponse(
+        is_valid=outcome.is_valid,
+        reason=outcome.reason,
+        missing_prereqs=outcome.missing_prereqs,
+        canonical_code=outcome.canonical_code,
+        original_input=outcome.original_input,
+        catalog_snapshot_id=outcome.snapshot.id,
+        synced_at=outcome.snapshot.synced_at,
+        source=outcome.snapshot.source,
+    )
+
+
+@router.post("/{plan_id}/recompute-audit", response_model=RecomputeAuditResponse)
+def recompute(plan_id: str, db: Session = Depends(get_db)) -> RecomputeAuditResponse:
+    try:
+        outcome = recompute_audit(db, plan_id=plan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return RecomputeAuditResponse(
+        audit_id=outcome.audit.id,
+        has_unsupported_rules=outcome.audit.has_unsupported_rules,
+        summary=outcome.audit.summary,
+        catalog_snapshot_id=outcome.snapshot.id,
+        synced_at=outcome.snapshot.synced_at,
+        source=outcome.snapshot.source,
+    )
+
+
+@router.get("/{plan_id}/audit/latest", response_model=AuditLatestResponse)
+def get_latest(plan_id: str, db: Session = Depends(get_db)) -> AuditLatestResponse:
+    audit = latest_audit(db, plan_id=plan_id)
+    if not audit:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No audit found")
+
+    plan = db.get(DegreePlan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan not found")
+
+    snapshot = db.get(CatalogSnapshot, audit.catalog_snapshot_id)
+    if not snapshot:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Snapshot not found")
+
+    req_rows = db.execute(
+        select(DegreeAuditRequirement).where(DegreeAuditRequirement.degree_audit_id == audit.id)
+    ).scalars().all()
+
+    return AuditLatestResponse(
+        audit_id=audit.id,
+        computed_at=audit.computed_at,
+        has_unsupported_rules=audit.has_unsupported_rules,
+        summary=audit.summary,
+        requirements=[
+            AuditRequirementResult(
+                requirement_node_id=r.requirement_node_id,
+                status=r.status,
+                detail=r.detail,
+            )
+            for r in req_rows
+        ],
+        catalog_snapshot_id=snapshot.id,
+        synced_at=snapshot.synced_at,
+        source=snapshot.source,
+    )
+
+
+@router.post("/{plan_id}/finalize", response_model=FinalizeResponse)
+def finalize(plan_id: str, db: Session = Depends(get_db)) -> FinalizeResponse:
+    plan = db.get(DegreePlan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan not found")
+
+    invalid_exists = db.execute(
+        select(PlanItem.id).where(
+            and_(PlanItem.plan_id == plan_id, PlanItem.plan_item_status == PlanItemStatus.INVALID)
+        )
+    ).first()
+    if invalid_exists:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Plan has invalid items")
+
+    outcome = recompute_audit(db, plan_id=plan_id)
+    if outcome.audit.has_unsupported_rules:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Plan contains unsupported rule evaluations",
+        )
+
+    plan.certification_state = CertificationState.CERTIFIED
+    db.add(plan)
+    db.commit()
+
+    return FinalizeResponse(
+        plan_id=plan_id,
+        certification_state=plan.certification_state.value,
+        finalized_at=datetime.utcnow(),
+    )
