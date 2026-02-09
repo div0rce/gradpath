@@ -96,3 +96,40 @@ def test_completion_status_passed_through_validation_call(client, user_id):
     with SessionLocal() as db:
         item = db.execute(select(PlanItem).where(PlanItem.id == "item-1")).scalars().one()
         assert item.validation_meta["completionStatusAtValidation"] == "IN_PROGRESS"
+
+
+def test_plan_item_id_collision_across_plans_is_rejected(client, user_id):
+    plan_id_a, summer_id, _ = _seed_plan(client, user_id)
+
+    # Create second plan against the same seeded ProgramVersion.
+    with SessionLocal() as db:
+        pv = db.execute(select(ProgramVersion)).scalars().first()
+    created_b = client.post(
+        "/v1/plans",
+        json={"user_id": user_id, "program_version_id": pv.id, "name": "Plan B"},
+    )
+    assert created_b.status_code == 200
+    plan_id_b = created_b.json()["plan_id"]
+
+    first = client.put(
+        f"/v1/plans/{plan_id_a}/items/shared-item",
+        json={
+            "term_id": summer_id,
+            "position": 1,
+            "raw_input": "14:540:100",
+            "completion_status": "YES",
+        },
+    )
+    assert first.status_code == 200
+
+    second = client.put(
+        f"/v1/plans/{plan_id_b}/items/shared-item",
+        json={
+            "term_id": summer_id,
+            "position": 1,
+            "raw_input": "14:540:100",
+            "completion_status": "YES",
+        },
+    )
+    assert second.status_code == 404
+    assert "different plan" in second.json()["detail"].lower()
