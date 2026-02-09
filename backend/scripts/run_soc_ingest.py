@@ -41,20 +41,24 @@ def _load_jobs_from_config(config_path: Path) -> list[IngestJob]:
     if not isinstance(rows, list):
         raise ValueError("config.jobs must be a list")
     jobs: list[IngestJob] = []
+    seen_slices: set[tuple[str, str]] = set()
     for idx, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
             raise ValueError(f"jobs[{idx}] must be an object")
-        sources = row.get("source_priority")
-        if isinstance(sources, list):
-            source_priority = [str(x) for x in sources]
-        elif isinstance(sources, str):
-            source_priority = _parse_sources(sources)
-        else:
-            source_priority = _parse_sources(None)
+        enabled_source = row.get("enabled_source")
+        if not isinstance(enabled_source, str) or not enabled_source.strip():
+            raise ValueError(f"jobs[{idx}].enabled_source must be a non-empty string")
+        source_priority = [enabled_source.strip()]
+        campus = str(row["campus"])
+        term_code = str(row["term_code"])
+        slice_key = (campus, term_code)
+        if slice_key in seen_slices:
+            raise ValueError(f"Duplicate enabled slice in config: campus={campus} term_code={term_code}")
+        seen_slices.add(slice_key)
         jobs.append(
             IngestJob(
-                campus=str(row["campus"]),
-                term_code=str(row["term_code"]),
+                campus=campus,
+                term_code=term_code,
                 source_priority=source_priority,
                 dry_run_first=bool(row.get("dry_run_first", False)),
             )
@@ -81,12 +85,14 @@ def _emit_record(record: dict[str, Any], output_path: Path | None) -> None:
 def run_job(job: IngestJob, *, api_base: str) -> dict[str, Any]:
     run_id = str(uuid4())
     started_at = _utc_now()
+    stage_attempted = False
     try:
         source_used, raw_payload = fetch_raw_payload_for_slice(
             campus=job.campus,
             term_code=job.term_code,
             source_priority=job.source_priority,
         )
+        stage_attempted = True
         stage = stage_soc_slice(
             api_base=api_base,
             campus=job.campus,
@@ -115,9 +121,27 @@ def run_job(job: IngestJob, *, api_base: str) -> dict[str, Any]:
             "snapshot_id": snapshot.get("snapshot_id"),
             "error_code": None,
             "error_message": None,
+            "completeness_reason": None,
+            "attempts": None,
+            "stage_attempted": stage_attempted,
         }
     except Exception as exc:
         detail = _detail_from_exception(exc)
+        attempts = detail.get("attempts")
+        completeness_reason = None
+        if detail.get("error_code") == "UPSTREAM_INCOMPLETE":
+            if isinstance(detail.get("completeness_reason"), str):
+                completeness_reason = detail["completeness_reason"]
+            elif isinstance(attempts, list):
+                first_reason = next(
+                    (
+                        a.get("completeness_reason")
+                        for a in attempts
+                        if isinstance(a, dict) and isinstance(a.get("completeness_reason"), str)
+                    ),
+                    None,
+                )
+                completeness_reason = first_reason
         return {
             "run_id": run_id,
             "source_used": None,
@@ -133,6 +157,9 @@ def run_job(job: IngestJob, *, api_base: str) -> dict[str, Any]:
             "snapshot_id": None,
             "error_code": detail.get("error_code", "SOC_RUNNER_FAILED"),
             "error_message": detail.get("message") or json.dumps(detail, sort_keys=True),
+            "completeness_reason": completeness_reason,
+            "attempts": attempts if isinstance(attempts, list) else None,
+            "stage_attempted": stage_attempted,
         }
 
 
