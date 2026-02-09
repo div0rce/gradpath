@@ -56,21 +56,60 @@ class DepartmentCSVAdapter(RegistrarFeedAdapter):
 
     def to_canonical_rows(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.validate_schema(payload)
+        parse_errors: list[dict[str, Any]] = []
 
         def to_bool(v: str, default: bool = False) -> bool:
             if v is None:
                 return default
             return str(v).strip().lower() in {"1", "true", "yes", "y", "x"}
 
+        def parse_json_field(
+            *,
+            raw: str | None,
+            filename: str,
+            row_number: int,
+            field: str,
+        ) -> Any | None:
+            if raw is None:
+                parse_errors.append(
+                    {
+                        "file": filename,
+                        "row": row_number,
+                        "field": field,
+                        "error": "Missing JSON value",
+                    }
+                )
+                return None
+            try:
+                return json.loads(raw)
+            except Exception as exc:
+                parse_errors.append(
+                    {
+                        "file": filename,
+                        "row": row_number,
+                        "field": field,
+                        "error": str(exc),
+                    }
+                )
+                return None
+
         req_rows = payload["program_requirements"]
         req_keyed: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for row in req_rows:
+        for i, row in enumerate(req_rows, start=2):
+            parsed_rule = parse_json_field(
+                raw=row.get("rule"),
+                filename="program_requirements.csv",
+                row_number=i,
+                field="rule",
+            )
+            if parsed_rule is None:
+                continue
             key = (row["program_code"], row["requirement_set_label"])
             req_keyed.setdefault(key, []).append(
                 {
                     "orderIndex": int(row.get("orderIndex") or 0),
                     "label": row["label"],
-                    "rule": json.loads(row["rule"]),
+                    "rule": parsed_rule,
                 }
             )
 
@@ -89,6 +128,28 @@ class DepartmentCSVAdapter(RegistrarFeedAdapter):
                     "requirements": sorted(req_keyed.get(key, []), key=lambda x: x["orderIndex"]),
                 }
             )
+
+        rules: list[dict[str, Any]] = []
+        for i, row in enumerate(payload["rules"], start=2):
+            parsed_rule = parse_json_field(
+                raw=row.get("rule"),
+                filename="rules.csv",
+                row_number=i,
+                field="rule",
+            )
+            if parsed_rule is None:
+                continue
+            rules.append(
+                {
+                    "course_code": row["course_code"],
+                    "kind": row["kind"],
+                    "rule": parsed_rule,
+                    "notes": row.get("notes") or None,
+                }
+            )
+
+        if parse_errors:
+            raise ValueError({"error_code": "CSV_PARSE_ERROR", "errors": parse_errors})
 
         return {
             "courses": [
@@ -121,15 +182,7 @@ class DepartmentCSVAdapter(RegistrarFeedAdapter):
                 }
                 for row in payload["offerings"]
             ],
-            "rules": [
-                {
-                    "course_code": row["course_code"],
-                    "kind": row["kind"],
-                    "rule": json.loads(row["rule"]),
-                    "notes": row.get("notes") or None,
-                }
-                for row in payload["rules"]
-            ],
+            "rules": rules,
             "programs": programs,
         }
 
