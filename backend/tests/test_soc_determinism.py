@@ -176,7 +176,7 @@ def test_stage_from_soc_noop_true_uses_baseline_for_dry_run_and_latest_for_stage
             {"term_code": "2025SU", "campus": "NB", "course_code": "14:540:100", "offered": True},
             {"term_code": "2025SU", "campus": "NB", "course_code": "14:540:200", "offered": True},
         ],
-        "metadata": {"parse_warnings": []},
+        "metadata": {"parse_warnings": [], "fetched_at": "2026-02-09T00:00:00Z"},
     }
 
     dry = client.post(
@@ -218,7 +218,7 @@ def test_stage_from_soc_dry_run_and_stage_have_same_checksum_and_noop(client):
             {"term_code": "2025SU", "campus": "NB", "course_code": "14:540:100", "offered": True},
             {"term_code": "2025SU", "campus": "NB", "course_code": "14:540:200", "offered": True},
         ],
-        "metadata": {"parse_warnings": []},
+        "metadata": {"parse_warnings": [], "fetched_at": "2026-02-09T00:00:00Z"},
     }
 
     dry = client.post(
@@ -260,7 +260,7 @@ def test_stage_from_soc_accepts_legacy_candidate_payload(client):
             {"term_code": "2025SU", "campus": "NB", "course_code": "14:540:100", "offered": True},
             {"term_code": "2025SU", "campus": "NB", "course_code": "14:540:200", "offered": True},
         ],
-        "metadata": {"parse_warnings": []},
+        "metadata": {"parse_warnings": [], "fetched_at": "2026-02-09T00:00:00Z"},
     }
     res = client.post(
         "/v1/catalog/snapshots:stage-from-soc",
