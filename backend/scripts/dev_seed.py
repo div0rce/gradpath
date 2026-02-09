@@ -45,6 +45,9 @@ def _find_conflicting_program_version(
     db,
     req: StageSnapshotRequest,
 ) -> ProgramVersion | None:
+    # Authoritative uniqueness key for fallback reuse:
+    # (program_code, campus, catalog_year) -> existing ProgramVersion.
+    # This mirrors uq_program_catalog_campus at the data-model layer.
     for p in req.programs:
         program = db.execute(
             select(Program).where(and_(Program.code == p.code, Program.campus == p.campus))
@@ -79,6 +82,10 @@ def _pick_snapshot_for_seed(db, req: StageSnapshotRequest) -> CatalogSnapshot:
         promoted = promote_snapshot(db, staged.id)
         return promoted
 
+    # Phase 1 safety rule:
+    # stage_payload_ready() is fixed and deterministic in this environment.
+    # If we must reuse an existing ProgramVersion due uniqueness constraints,
+    # we treat snapshot reuse as safe under that fixed payload assumption.
     # Prevent UNIQUE collisions by resolving existing ProgramVersion first.
     conflict = _find_conflicting_program_version(db, req)
     if conflict:
