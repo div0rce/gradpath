@@ -63,8 +63,8 @@ def validate_soc_raw_payload(payload: dict[str, Any]) -> None:
         raise _schema_violation("metadata.parse_warnings must be a list[str]")
 
     fetched_at = metadata.get("fetched_at")
-    if fetched_at is not None and not isinstance(fetched_at, str):
-        raise _schema_violation("metadata.fetched_at must be a string when present")
+    if not isinstance(fetched_at, str) or not fetched_at.strip():
+        raise _schema_violation("metadata.fetched_at must be a non-empty string")
 
     raw_hash = metadata.get("raw_hash")
     if raw_hash is not None and not isinstance(raw_hash, str):
@@ -151,7 +151,7 @@ def canonicalize_soc_raw_payload(
                 "term_code": row_term,
                 "campus": row_campus,
                 "course_code": str(row.get("course_code", "")),
-                "offered": bool(row.get("offered", False)),
+                "offered": row["offered"],
             }
         )
     offerings.sort(key=lambda row: row["course_code"])
@@ -167,15 +167,15 @@ def canonicalize_soc_raw_payload(
     parse_warnings = sorted(str(x) for x in parse_warnings_raw)
 
     fetched_at = metadata_in.get("fetched_at")
-    if fetched_at is None:
-        fetched_at = datetime.now(tz=timezone.utc).isoformat()
+    if not isinstance(fetched_at, str) or not fetched_at.strip():
+        raise _schema_violation("metadata.fetched_at must be a non-empty string")
 
     canonical_payload = {
         "terms": terms,
         "offerings": offerings,
         "metadata": {
             "source_urls": source_urls,
-            "fetched_at": str(fetched_at),
+            "fetched_at": fetched_at,
             "parse_warnings": parse_warnings,
         },
     }
@@ -232,6 +232,7 @@ class BasePullAdapter(ABC):
         raise NotImplementedError
 
     def fetch(self, *, term_code: str, campus: str) -> SocFetchResult:
+        fetch_started_at = datetime.now(tz=timezone.utc).isoformat()
         params = self.build_params(term_code=term_code, campus=campus)
         upstream = self.fetch_json(
             self.base_url,
@@ -255,7 +256,11 @@ class BasePullAdapter(ABC):
         if not isinstance(source_urls, list):
             source_urls = [self.base_url]
         metadata["source_urls"] = [str(x) for x in source_urls]
-        metadata.setdefault("fetched_at", datetime.now(tz=timezone.utc).isoformat())
+        upstream_fetched_at = metadata.get("fetched_at")
+        if isinstance(upstream_fetched_at, str) and upstream_fetched_at.strip():
+            metadata["fetched_at"] = upstream_fetched_at
+        else:
+            metadata["fetched_at"] = fetch_started_at
         parse_warnings = metadata.get("parse_warnings", [])
         if not isinstance(parse_warnings, list):
             parse_warnings = []
