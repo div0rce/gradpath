@@ -41,24 +41,54 @@ Implementation of the Rutgers Degree Planner migration plan with:
   - `/progress/[planId]`
 - Backend wiring through `NEXT_PUBLIC_API_BASE`
 
-## Quickstart
+## Quickstart (One Env, One Flow)
 
-### Backend
+### 1) One-time setup
 
 ```bash
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload
 ```
 
-### Run tests
+### 2) Run API
+
+```bash
+cd backend
+source .venv/bin/activate
+uvicorn app.main:app --reload --port 8000
+```
+
+Health check:
+
+```bash
+curl -s http://localhost:8000/health
+```
+
+### 3) Run tests
 
 ```bash
 cd backend
 source .venv/bin/activate
 pytest -q
+```
+
+### 4) Run end-to-end dev flow
+
+In a second terminal (while API is running):
+
+```bash
+cd backend
+source .venv/bin/activate
+chmod +x scripts/dev_flow.sh
+scripts/dev_flow.sh
+```
+
+Optional env overrides:
+
+```bash
+API=http://localhost:8000 DEV_NETID=dev123 DEV_EMAIL=dev123@rutgers.edu scripts/dev_flow.sh
 ```
 
 ### Frontend
@@ -68,6 +98,27 @@ cd apps/web
 npm install
 NEXT_PUBLIC_API_BASE=http://localhost:8000 npm run dev
 ```
+
+## Troubleshooting
+
+- `POST /v1/plans/{planId}:ready` returns 404:
+  - confirm route is loaded:
+    ```bash
+    curl -s http://localhost:8000/openapi.json | jq -r '.paths | keys[]' | grep ':ready'
+    ```
+  - if missing, restart `uvicorn`.
+
+- Local DB reset for clean-room testing:
+  ```bash
+  cd backend
+  rm -f gradpath.db
+  source .venv/bin/activate
+  python - <<'PY'
+  from app.db import Base, engine
+  Base.metadata.create_all(bind=engine)
+  print("fresh db ready")
+  PY
+  ```
 
 ## Notes
 
