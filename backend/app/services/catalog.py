@@ -30,6 +30,10 @@ class ActiveSnapshotDetails:
     snapshot: CatalogSnapshot
 
 
+def _stage_validation_error(errors: list[dict[str, Any]]) -> None:
+    raise ValueError({"error_code": "STAGE_VALIDATION_ERROR", "errors": errors})
+
+
 def _extract_course_refs(rule: dict[str, Any]) -> set[str]:
     refs: set[str] = set()
 
@@ -49,6 +53,128 @@ def _extract_course_refs(rule: dict[str, Any]) -> set[str]:
 
 
 def stage_snapshot(db: Session, payload: StageSnapshotRequest) -> CatalogSnapshot:
+    errors: list[dict[str, Any]] = []
+
+    if len(payload.courses) < 1:
+        errors.append({"field": "courses", "code": "MIN_ITEMS", "min": 1})
+    if len(payload.terms) < 1:
+        errors.append({"field": "terms", "code": "MIN_ITEMS", "min": 1})
+    if len(payload.offerings) < 1:
+        errors.append({"field": "offerings", "code": "MIN_ITEMS", "min": 1})
+    if len(payload.programs) < 1:
+        errors.append({"field": "programs", "code": "MIN_ITEMS", "min": 1})
+
+    seen_course_codes: set[str] = set()
+    for idx, c in enumerate(payload.courses, start=1):
+        if c.code in seen_course_codes:
+            errors.append(
+                {"field": "courses", "code": "DUPLICATE_CODE", "index": idx, "value": c.code}
+            )
+        seen_course_codes.add(c.code)
+
+    seen_term_keys: set[tuple[str, str]] = set()
+    for idx, t in enumerate(payload.terms, start=1):
+        key = (t.campus, t.code)
+        if key in seen_term_keys:
+            errors.append(
+                {
+                    "field": "terms",
+                    "code": "DUPLICATE_TERM_KEY",
+                    "index": idx,
+                    "campus": t.campus,
+                    "term_code": t.code,
+                }
+            )
+        seen_term_keys.add(key)
+
+    for idx, o in enumerate(payload.offerings, start=1):
+        if o.course_code not in seen_course_codes:
+            errors.append(
+                {
+                    "field": "offerings",
+                    "code": "UNKNOWN_COURSE",
+                    "index": idx,
+                    "course_code": o.course_code,
+                }
+            )
+        if (o.campus, o.term_code) not in seen_term_keys:
+            errors.append(
+                {
+                    "field": "offerings",
+                    "code": "UNKNOWN_TERM",
+                    "index": idx,
+                    "campus": o.campus,
+                    "term_code": o.term_code,
+                }
+            )
+
+    for idx, r in enumerate(payload.rules, start=1):
+        if r.course_code not in seen_course_codes:
+            errors.append(
+                {
+                    "field": "rules",
+                    "code": "UNKNOWN_COURSE",
+                    "index": idx,
+                    "course_code": r.course_code,
+                }
+            )
+        try:
+            validate_rule_schema(r.rule)
+        except Exception as exc:  # pragma: no cover - schema details are tested in rule_engine
+            errors.append(
+                {"field": "rules", "code": "INVALID_RULE_AST", "index": idx, "error": str(exc)}
+            )
+
+    for p_idx, p in enumerate(payload.programs, start=1):
+        if not p.requirements:
+            errors.append(
+                {
+                    "field": "programs",
+                    "code": "MIN_REQUIREMENTS",
+                    "index": p_idx,
+                    "program_code": p.code,
+                    "min": 1,
+                }
+            )
+            continue
+        for r_idx, req in enumerate(p.requirements, start=1):
+            label = req.get("label")
+            rule = req.get("rule")
+            if not label:
+                errors.append(
+                    {
+                        "field": "program_requirements",
+                        "code": "MISSING_LABEL",
+                        "program_code": p.code,
+                        "index": r_idx,
+                    }
+                )
+            if not isinstance(rule, dict):
+                errors.append(
+                    {
+                        "field": "program_requirements",
+                        "code": "INVALID_RULE_TYPE",
+                        "program_code": p.code,
+                        "index": r_idx,
+                    }
+                )
+                continue
+            try:
+                validate_rule_schema(rule)
+            except Exception as exc:
+                errors.append(
+                    {
+                        "field": "program_requirements",
+                        "code": "INVALID_RULE_AST",
+                        "program_code": p.code,
+                        "index": r_idx,
+                        "error": str(exc),
+                    }
+                )
+
+    if errors:
+        _stage_validation_error(errors)
+
     snapshot = CatalogSnapshot(
         source=payload.source,
         checksum=payload.checksum,
@@ -61,8 +187,6 @@ def stage_snapshot(db: Session, payload: StageSnapshotRequest) -> CatalogSnapsho
 
     course_by_code: dict[str, Course] = {}
     for c in payload.courses:
-        if c.code in course_by_code:
-            raise ValueError(f"Duplicate course code: {c.code}")
         course = Course(
             catalog_snapshot_id=snapshot.id,
             code=c.code,
@@ -78,8 +202,6 @@ def stage_snapshot(db: Session, payload: StageSnapshotRequest) -> CatalogSnapsho
     term_by_key: dict[tuple[str, str], Term] = {}
     for t in payload.terms:
         key = (t.campus, t.code)
-        if key in term_by_key:
-            raise ValueError(f"Duplicate term key: {key}")
         term = Term(
             catalog_snapshot_id=snapshot.id,
             campus=t.campus,
@@ -96,29 +218,21 @@ def stage_snapshot(db: Session, payload: StageSnapshotRequest) -> CatalogSnapsho
     for o in payload.offerings:
         course = course_by_code.get(o.course_code)
         term = term_by_key.get((o.campus, o.term_code))
-        if not course:
-            raise ValueError(f"Offering references unknown course: {o.course_code}")
-        if not term:
-            raise ValueError(f"Offering references unknown term: {(o.campus, o.term_code)}")
 
         db.add(
             CourseOffering(
                 catalog_snapshot_id=snapshot.id,
-                course_id=course.id,
-                term_id=term.id,
+                course_id=course.id,  # validated above
+                term_id=term.id,  # validated above
                 offered=o.offered,
             )
         )
 
     for r in payload.rules:
         course = course_by_code.get(r.course_code)
-        if not course:
-            raise ValueError(f"Rule references unknown course: {r.course_code}")
-
-        validate_rule_schema(r.rule)
         row = CourseRule(
             catalog_snapshot_id=snapshot.id,
-            course_id=course.id,
+            course_id=course.id,  # validated above
             kind=r.kind,
             rule=r.rule,
             notes=r.notes,
@@ -161,9 +275,6 @@ def stage_snapshot(db: Session, payload: StageSnapshotRequest) -> CatalogSnapsho
         for idx, req in enumerate(p.requirements, start=1):
             label = req.get("label")
             rule = req.get("rule")
-            if not label or not isinstance(rule, dict):
-                raise ValueError("Requirement entries must include label and rule")
-            validate_rule_schema(rule)
             db.add(
                 RequirementNode(
                     requirement_set_id=req_set.id,
