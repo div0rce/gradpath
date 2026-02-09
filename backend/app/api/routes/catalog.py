@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -20,12 +22,28 @@ from app.services.catalog import get_active_snapshot, promote_snapshot, search_c
 router = APIRouter(prefix="/v1/catalog", tags=["catalog"])
 
 
+def _detail_from_exception(exc: Exception) -> Any:
+    if exc.args:
+        first = exc.args[0]
+        if isinstance(first, dict):
+            return first
+        if isinstance(first, str):
+            try:
+                parsed = json.loads(first)
+            except Exception:
+                return first
+            if isinstance(parsed, dict):
+                return parsed
+            return first
+    return str(exc)
+
+
 @router.post("/snapshots:stage", response_model=SnapshotResponse)
 def stage(req: StageSnapshotRequest, db: Session = Depends(get_db)) -> SnapshotResponse:
     try:
         snapshot = stage_snapshot(db, req)
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_detail_from_exception(exc)) from exc
 
     return SnapshotResponse(
         snapshot_id=snapshot.id,
@@ -50,7 +68,7 @@ def stage_from_csv(req: StageFromCsvRequest, db: Session = Depends(get_db)) -> S
         )
         snapshot = stage_snapshot(db, stage_req)
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_detail_from_exception(exc)) from exc
 
     return SnapshotResponse(
         snapshot_id=snapshot.id,
