@@ -18,6 +18,7 @@ from app.services.soc_pull import (
 )
 
 SOC_STAGE_PATH = "/v1/catalog/snapshots:stage-from-soc"
+ATTEMPT_KEYS = {"source", "error_code", "message", "completeness_reason", "detail"}
 
 SOURCE_ALIASES = {
     "WEBREG_PUBLIC": "WEBREG_PUBLIC",
@@ -39,10 +40,31 @@ def _detail_from_exception(exc: Exception) -> dict[str, Any]:
     return {"error_code": "SOC_FETCH_FAILED", "message": str(exc)}
 
 
-def _normalize_completeness_reason(reason: Any) -> str:
+def normalize_reason(reason: Any) -> str:
     if isinstance(reason, str) and reason in COMPLETENESS_REASONS:
         return reason
     return "UNKNOWN_COMPLETENESS"
+
+
+def is_stageable(result: SocFetchResult) -> bool:
+    return result.is_complete is True and result.completeness_reason is None
+
+
+def _attempt(
+    *,
+    source: str,
+    error_code: str,
+    message: str | None = None,
+    completeness_reason: str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "source": source,
+        "error_code": error_code,
+        "message": message,
+        "completeness_reason": completeness_reason,
+        "detail": detail,
+    }
 
 
 def build_default_adapters() -> dict[str, Any]:
@@ -69,40 +91,120 @@ def fetch_raw_payload_for_slice(
         source_key = _normalize_source(source)
         adapter = adapter_map.get(source_key)
         if not adapter:
-            attempts.append({"source": source_key, "error_code": "SOC_FETCH_FAILED", "message": "Unknown source"})
+            attempts.append(
+                _attempt(
+                    source=source_key,
+                    error_code="SOC_FETCH_FAILED",
+                    message="Unknown source",
+                    detail={"message": "Unknown source"},
+                )
+            )
             continue
 
         try:
             result: SocFetchResult = adapter.fetch(term_code=term_code, campus=campus)
-            validate_soc_raw_payload(result.raw_payload)
-            payload = canonicalize_soc_raw_payload(result.raw_payload, term_code=term_code, campus=campus)
-
-            if result.is_complete is False:
-                attempts.append(
-                    {
-                        "source": source_key,
-                        "error_code": "UPSTREAM_INCOMPLETE",
-                        "completeness_reason": _normalize_completeness_reason(result.completeness_reason),
-                    }
-                )
-                continue
-
-            if result.completeness_reason is not None:
-                attempts.append(
-                    {
-                        "source": source_key,
-                        "error_code": "UPSTREAM_INCOMPLETE",
-                        "completeness_reason": _normalize_completeness_reason(result.completeness_reason),
-                    }
-                )
-                continue
-
-            return source_key, payload
         except Exception as exc:
             detail = _detail_from_exception(exc)
-            detail["source"] = source_key
-            attempts.append(detail)
+            attempts.append(
+                _attempt(
+                    source=source_key,
+                    error_code="SOC_FETCH_FAILED",
+                    message=detail.get("message") or str(exc),
+                    detail=detail,
+                )
+            )
+            continue
 
+        try:
+            validate_soc_raw_payload(result.raw_payload)
+        except ValueError as exc:
+            detail = _detail_from_exception(exc)
+            error_code = detail.get("error_code")
+            if error_code == "SOC_SCHEMA_VIOLATION":
+                attempts.append(
+                    _attempt(
+                        source=source_key,
+                        error_code="SOC_SCHEMA_VIOLATION",
+                        message=detail.get("message"),
+                        detail=detail,
+                    )
+                )
+            else:
+                attempts.append(
+                    _attempt(
+                        source=source_key,
+                        error_code="SOC_FETCH_FAILED",
+                        message=detail.get("message") or str(exc),
+                        detail=detail,
+                    )
+                )
+            continue
+        except Exception as exc:
+            detail = _detail_from_exception(exc)
+            attempts.append(
+                _attempt(
+                    source=source_key,
+                    error_code="SOC_FETCH_FAILED",
+                    message=detail.get("message") or str(exc),
+                    detail=detail,
+                )
+            )
+            continue
+
+        if not is_stageable(result):
+            attempts.append(
+                _attempt(
+                    source=source_key,
+                    error_code="UPSTREAM_INCOMPLETE",
+                    completeness_reason=normalize_reason(result.completeness_reason),
+                )
+            )
+            continue
+
+        try:
+            payload = canonicalize_soc_raw_payload(result.raw_payload, term_code=term_code, campus=campus)
+        except ValueError as exc:
+            detail = _detail_from_exception(exc)
+            error_code = detail.get("error_code")
+            if error_code == "SOC_SCHEMA_VIOLATION":
+                attempts.append(
+                    _attempt(
+                        source=source_key,
+                        error_code="SOC_SCHEMA_VIOLATION",
+                        message=detail.get("message"),
+                        detail=detail,
+                    )
+                )
+            else:
+                attempts.append(
+                    _attempt(
+                        source=source_key,
+                        error_code="SOC_FETCH_FAILED",
+                        message=detail.get("message") or str(exc),
+                        detail=detail,
+                    )
+                )
+            continue
+        except Exception as exc:
+            detail = _detail_from_exception(exc)
+            attempts.append(
+                _attempt(
+                    source=source_key,
+                    error_code="SOC_FETCH_FAILED",
+                    message=detail.get("message") or str(exc),
+                    detail=detail,
+                )
+            )
+            continue
+
+        return source_key, payload
+
+    for attempt in attempts:
+        assert set(attempt.keys()) == ATTEMPT_KEYS
+
+    # NOTE: anything other than pure completeness failures escalates the top-level
+    # error to SOC_FETCH_FAILED so operators can distinguish "incomplete upstream"
+    # from fetch/parse/schema defects.
     if attempts and all(attempt.get("error_code") == "UPSTREAM_INCOMPLETE" for attempt in attempts):
         raise ValueError(
             {
