@@ -112,6 +112,18 @@ class StageFromCsvRequest(BaseModel):
     source_metadata: dict[str, Any] | None = None
 
 
+class StageFromSocRequest(BaseModel):
+    term_code: str
+    campus: str
+    dry_run: bool = False
+    checksum: str | None = None
+    ingest_source: str = "WEBREG_PUBLIC"
+    source_metadata: dict[str, Any] | None = None
+    raw_payload: dict[str, Any] | None = None
+    # Deprecated compatibility field. Use raw_payload.
+    candidate_payload: dict[str, Any] | None = None
+
+
 class SnapshotResponse(BaseModel):
     snapshot_id: str
     status: CatalogSnapshotStatus
@@ -167,6 +179,26 @@ class ReadyResponse(BaseModel):
     checked_at: datetime
     catalog_snapshot_id: str
     requirement_set_id: str
+
+
+class SocSliceResponse(BaseModel):
+    term_id: str
+    term_code: str
+    campus: str
+
+
+class SocStageResult(BaseModel):
+    noop: bool
+    checksum: str
+    unknown_courses_dropped_count: int
+    parse_warnings_count: int
+    zero_offerings: bool
+    slice: SocSliceResponse
+
+
+class SocStageResponse(BaseModel):
+    snapshot: SnapshotResponse
+    result: SocStageResult
 
 
 class PlanItemDetailResponse(BaseModel):
