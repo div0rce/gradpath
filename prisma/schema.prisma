@@ -1,0 +1,392 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum CatalogSnapshotStatus {
+  STAGED
+  PUBLISHED
+  FAILED
+  ARCHIVED
+}
+
+enum CatalogSource {
+  DEPARTMENT_CSV
+  SOC_SCRAPE
+  SIS
+}
+
+enum UserRole {
+  STUDENT
+  ADVISOR
+  ADMIN
+}
+
+enum RequirementSetStatus {
+  DRAFT
+  APPROVED
+  RETIRED
+}
+
+enum TermSeason {
+  FALL
+  WINTER
+  SPRING
+  SUMMER
+}
+
+enum RuleKind {
+  PREREQ
+  COREQ
+  RESTRICTION
+}
+
+enum PlanItemStatus {
+  DRAFT
+  VALID
+  INVALID
+}
+
+enum CompletionStatus {
+  YES
+  IN_PROGRESS
+  NO
+  BLANK
+}
+
+enum ValidationReason {
+  INVALID_COURSE
+  NOT_OFFERED
+  PREREQ_MISSING
+  UNSUPPORTED_RULE
+}
+
+enum CertificationState {
+  DRAFT
+  READY
+  CERTIFIED
+}
+
+enum AuditRequirementStatus {
+  SATISFIED
+  PENDING
+  MISSING
+  UNKNOWN
+}
+
+model User {
+  id              String                @id @default(uuid())
+  netId           String                @unique
+  email           String                @unique
+  role            UserRole
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  degreePlans     DegreePlan[]
+  advisorLinks    AdvisorStudentAccess[] @relation("AdvisorLinks")
+  studentLinks    AdvisorStudentAccess[] @relation("StudentLinks")
+  approvedReqSets RequirementSet[]      @relation("RequirementSetApprover")
+  auditLogs       AuditLog[]
+}
+
+model AdvisorStudentAccess {
+  id        String   @id @default(uuid())
+  advisorId String
+  studentId String
+  createdAt DateTime @default(now())
+
+  advisor User @relation("AdvisorLinks", fields: [advisorId], references: [id])
+  student User @relation("StudentLinks", fields: [studentId], references: [id])
+
+  @@unique([advisorId, studentId])
+  @@index([studentId])
+}
+
+model CatalogSnapshot {
+  id                String                @id @default(uuid())
+  source            CatalogSource
+  syncedAt          DateTime              @default(now())
+  checksum          String
+  status            CatalogSnapshotStatus
+  publishedAt       DateTime?
+  sourceMetadata    Json?
+
+  courses           Course[]
+  terms             Term[]
+  offerings         CourseOffering[]
+  courseRules       CourseRule[]
+  prerequisiteEdges PrerequisiteEdge[]
+  programVersions   ProgramVersion[]
+  degreePlansPinned DegreePlan[]          @relation("PlanPinnedSnapshot")
+  degreeAudits      DegreeAudit[]
+  activePointer     ActiveCatalogSnapshot?
+}
+
+model ActiveCatalogSnapshot {
+  id                Int             @id @default(1)
+  catalogSnapshotId String          @unique
+  updatedAt         DateTime        @updatedAt
+
+  catalogSnapshot   CatalogSnapshot @relation(fields: [catalogSnapshotId], references: [id])
+}
+
+model Program {
+  id              String          @id @default(uuid())
+  code            String
+  name            String
+  campus          String
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  requirementSets RequirementSet[]
+  versions        ProgramVersion[]
+
+  @@unique([code, campus])
+}
+
+model RequirementSet {
+  id                String               @id @default(uuid())
+  programId         String
+  versionLabel      String
+  status            RequirementSetStatus
+  approvedAt        DateTime?
+  approvedByUserId  String?
+  notes             String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  program           Program              @relation(fields: [programId], references: [id])
+  approvedBy        User?                @relation("RequirementSetApprover", fields: [approvedByUserId], references: [id])
+  nodes             RequirementNode[]
+  programVersions   ProgramVersion[]
+  degreePlansPinned DegreePlan[]         @relation("PlanPinnedRequirementSet")
+  degreeAudits      DegreeAudit[]
+
+  @@unique([programId, versionLabel])
+}
+
+model RequirementNode {
+  id                String                 @id @default(uuid())
+  requirementSetId  String
+  orderIndex        Int
+  label             String
+  rule              Json
+  ruleSchemaVersion Int                    @default(1)
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+
+  requirementSet    RequirementSet         @relation(fields: [requirementSetId], references: [id])
+  auditResults      DegreeAuditRequirement[]
+
+  @@unique([requirementSetId, orderIndex])
+  @@index([requirementSetId, label])
+}
+
+model ProgramVersion {
+  id                String          @id @default(uuid())
+  programId         String
+  requirementSetId  String
+  catalogSnapshotId String
+  catalogYear       String
+  campus            String
+  effectiveFrom     DateTime
+  effectiveTo       DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  program           Program         @relation(fields: [programId], references: [id])
+  requirementSet    RequirementSet  @relation(fields: [requirementSetId], references: [id])
+  catalogSnapshot   CatalogSnapshot @relation(fields: [catalogSnapshotId], references: [id])
+  degreePlans       DegreePlan[]
+
+  @@unique([programId, catalogYear, campus])
+  @@index([catalogSnapshotId])
+}
+
+model Term {
+  id                String          @id @default(uuid())
+  catalogSnapshotId String
+  campus            String
+  code              String
+  year              Int
+  season            TermSeason
+  startsAt          DateTime?
+  endsAt            DateTime?
+  createdAt         DateTime        @default(now())
+
+  catalogSnapshot   CatalogSnapshot @relation(fields: [catalogSnapshotId], references: [id])
+  offerings         CourseOffering[]
+  planItems         PlanItem[]
+
+  @@unique([catalogSnapshotId, campus, code])
+  @@index([catalogSnapshotId, year, season])
+}
+
+model Course {
+  id                String             @id @default(uuid())
+  catalogSnapshotId String
+  code              String
+  title             String
+  credits           Int
+  active            Boolean            @default(true)
+  category          String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  catalogSnapshot   CatalogSnapshot    @relation(fields: [catalogSnapshotId], references: [id])
+  offerings         CourseOffering[]
+  rules             CourseRule[]
+  prerequisiteEdges PrerequisiteEdge[] @relation("CoursePrereqEdges")
+  requiredByEdges   PrerequisiteEdge[] @relation("PrereqCourseEdges")
+  planItems         PlanItem[]
+
+  @@unique([catalogSnapshotId, code])
+  @@index([catalogSnapshotId, title])
+}
+
+model CourseOffering {
+  id                String          @id @default(uuid())
+  catalogSnapshotId String
+  courseId          String
+  termId            String
+  offered           Boolean
+  createdAt         DateTime        @default(now())
+
+  catalogSnapshot   CatalogSnapshot @relation(fields: [catalogSnapshotId], references: [id])
+  course            Course          @relation(fields: [courseId], references: [id])
+  term              Term            @relation(fields: [termId], references: [id])
+
+  @@unique([catalogSnapshotId, courseId, termId])
+  @@index([termId, offered])
+}
+
+model CourseRule {
+  id                String             @id @default(uuid())
+  catalogSnapshotId String
+  courseId          String
+  kind              RuleKind
+  rule              Json
+  ruleSchemaVersion Int                @default(1)
+  notes             String?
+  createdAt         DateTime           @default(now())
+
+  catalogSnapshot   CatalogSnapshot    @relation(fields: [catalogSnapshotId], references: [id])
+  course            Course             @relation(fields: [courseId], references: [id])
+  derivedEdges      PrerequisiteEdge[]
+
+  @@unique([catalogSnapshotId, courseId, kind])
+  @@index([catalogSnapshotId, kind])
+}
+
+model PrerequisiteEdge {
+  id                String          @id @default(uuid())
+  catalogSnapshotId String
+  courseId          String
+  prereqCourseId    String
+  derivedFromRuleId String?
+
+  catalogSnapshot   CatalogSnapshot @relation(fields: [catalogSnapshotId], references: [id])
+  course            Course          @relation("CoursePrereqEdges", fields: [courseId], references: [id])
+  prereqCourse      Course          @relation("PrereqCourseEdges", fields: [prereqCourseId], references: [id])
+  derivedFromRule   CourseRule?     @relation(fields: [derivedFromRuleId], references: [id])
+
+  @@unique([catalogSnapshotId, courseId, prereqCourseId])
+  @@index([catalogSnapshotId, prereqCourseId])
+}
+
+model DegreePlan {
+  id                     String            @id @default(uuid())
+  userId                 String
+  programVersionId       String
+  pinnedCatalogSnapshotId String
+  pinnedRequirementSetId String
+  name                   String
+  certificationState     CertificationState @default(DRAFT)
+  createdAt              DateTime          @default(now())
+  updatedAt              DateTime          @updatedAt
+
+  user                   User            @relation(fields: [userId], references: [id])
+  programVersion         ProgramVersion  @relation(fields: [programVersionId], references: [id])
+  pinnedCatalogSnapshot  CatalogSnapshot @relation("PlanPinnedSnapshot", fields: [pinnedCatalogSnapshotId], references: [id])
+  pinnedRequirementSet   RequirementSet  @relation("PlanPinnedRequirementSet", fields: [pinnedRequirementSetId], references: [id])
+  items                  PlanItem[]
+  audits                 DegreeAudit[]
+
+  @@index([userId, certificationState])
+  @@index([pinnedCatalogSnapshotId])
+  @@index([pinnedRequirementSetId])
+}
+
+model PlanItem {
+  id               String          @id @default(uuid())
+  planId           String
+  termId           String
+  position         Int
+  rawInput         String
+  canonicalCode    String?
+  courseId         String?
+  planItemStatus   PlanItemStatus  @default(DRAFT)
+  completionStatus CompletionStatus @default(BLANK)
+  validationReason ValidationReason?
+  validationMeta   Json?
+  lastValidatedAt  DateTime?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  plan             DegreePlan @relation(fields: [planId], references: [id])
+  term             Term       @relation(fields: [termId], references: [id])
+  course           Course?    @relation(fields: [courseId], references: [id])
+
+  @@unique([planId, termId, position])
+  @@index([planId, planItemStatus])
+  @@index([canonicalCode])
+}
+
+model DegreeAudit {
+  id                  String   @id @default(uuid())
+  planId              String
+  catalogSnapshotId   String
+  requirementSetId    String
+  computedAt          DateTime @default(now())
+  hasUnsupportedRules Boolean  @default(false)
+  summary             Json
+
+  plan                DegreePlan      @relation(fields: [planId], references: [id])
+  catalogSnapshot     CatalogSnapshot @relation(fields: [catalogSnapshotId], references: [id])
+  requirementSet      RequirementSet  @relation(fields: [requirementSetId], references: [id])
+  requirementResults  DegreeAuditRequirement[]
+
+  @@index([planId, computedAt])
+  @@index([hasUnsupportedRules])
+}
+
+model DegreeAuditRequirement {
+  id                String                @id @default(uuid())
+  degreeAuditId     String
+  requirementNodeId String
+  status            AuditRequirementStatus
+  detail            Json?
+
+  degreeAudit       DegreeAudit      @relation(fields: [degreeAuditId], references: [id])
+  requirementNode   RequirementNode  @relation(fields: [requirementNodeId], references: [id])
+
+  @@unique([degreeAuditId, requirementNodeId])
+  @@index([status])
+}
+
+model AuditLog {
+  id           String   @id @default(uuid())
+  actorUserId  String
+  action       String
+  resourceType String
+  resourceId   String
+  meta         Json?
+  createdAt    DateTime @default(now())
+
+  actor        User @relation(fields: [actorUserId], references: [id])
+
+  @@index([actorUserId, createdAt])
+  @@index([resourceType, resourceId])
+}
