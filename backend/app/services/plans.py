@@ -45,6 +45,8 @@ def upsert_plan_item(
     )
 
     item = db.get(PlanItem, item_id)
+    if item and item.plan_id != plan_id:
+        raise ValueError("Plan item id belongs to a different plan")
     if not item:
         item = PlanItem(id=item_id, plan_id=plan_id)
         db.add(item)
