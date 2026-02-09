@@ -1,0 +1,10 @@
+{
+  "jobs": [
+    {
+      "campus": "NB",
+      "term_code": "2025SU",
+      "enabled_source": "WEBREG_PUBLIC",
+      "dry_run_first": false
+    }
+  ]
+}
