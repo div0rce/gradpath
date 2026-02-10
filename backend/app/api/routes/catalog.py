@@ -90,6 +90,7 @@ def _build_soc_resolution_metadata(
         "offered_rows_seen": int(offered_rows_seen),
         # v1 intentionally uses normalized identity as the unknown-count boundary.
         "unknown_codes_count": normalized_unknown_count,
+        # Diagnostic-only metric: not suitable for gating/comparison decisions.
         "raw_unknown_count": len(raw_unknown_codes),
         "unknown_code_samples_raw": raw_samples[:SOC_RESOLUTION_SAMPLE_SIZE],
         "unknown_code_samples_normalized": normalized_sorted[:SOC_RESOLUTION_SAMPLE_SIZE],
@@ -297,6 +298,9 @@ def stage_from_soc(req: StageFromSocRequest, db: Session = Depends(get_db)) -> S
         latest_checksum = None
         if latest_published_soc:
             latest_checksum = (latest_published_soc.source_metadata or {}).get("soc_slice_checksum")
+        # Checksum is a fast-path signal only.
+        # Final noop decision is resolved-offering-set equality for (term_code, campus),
+        # which remains stable across bootstrap/promotion boundaries.
         noop = latest_checksum == checksum if latest_checksum is not None else False
         if latest_published_soc:
             # Noop decision is resolved-slice based: identical upstream resolved offering identities
