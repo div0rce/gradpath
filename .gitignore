@@ -13,3 +13,4 @@ backend/.ruff_cache/
 
 *.db
 git-diff.patch
+backend/var/soc_ingest_runs.jsonl
