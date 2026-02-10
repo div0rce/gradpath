@@ -116,6 +116,19 @@ def test_stage_accepts_v2_requirement_rules_and_persists_schema_version(client):
                 ],
             },
         },
+        {
+            "orderIndex": 4,
+            "label": "Count Two",
+            "rule": {
+                "type": "COUNT_MIN",
+                "min_count": 2,
+                "children": [
+                    {"type": "COURSE_SET", "courses": ["14:540:100"]},
+                    {"type": "COURSE_SET", "courses": ["14:540:200"]},
+                    {"type": "COURSE_SET", "courses": ["14:540:300"]},
+                ],
+            },
+        },
     ]
     stage = client.post("/v1/catalog/snapshots:stage", json=payload)
     assert stage.status_code == 200, stage.text
@@ -127,12 +140,46 @@ def test_stage_accepts_v2_requirement_rules_and_persists_schema_version(client):
             .where(RequirementNode.rule_schema_version == 2)
             .order_by(RequirementNode.order_index.asc())
         ).scalars().all()
-        assert len(rows) == 3
+        assert len(rows) == 4
         assert rows[0].label == "Intro"
         assert rows[0].rule["type"] == "COURSE_SET"
         assert rows[1].label == "Core Block"
         assert rows[1].rule["type"] == "ALL_OF"
         assert rows[2].label == "Pick One"
         assert rows[2].rule["type"] == "N_OF"
-        assert rows[0].requirement_set_id == rows[1].requirement_set_id == rows[2].requirement_set_id
+        assert rows[3].label == "Count Two"
+        assert rows[3].rule["type"] == "COUNT_MIN"
+        assert (
+            rows[0].requirement_set_id
+            == rows[1].requirement_set_id
+            == rows[2].requirement_set_id
+            == rows[3].requirement_set_id
+        )
         assert snapshot_id
+
+
+def test_stage_rejects_count_min_relation_when_min_count_exceeds_children(client):
+    payload = stage_payload()
+    payload["programs"][0]["requirements"] = [
+        {
+            "orderIndex": 1,
+            "label": "Invalid Count",
+            "rule": {
+                "type": "COUNT_MIN",
+                "min_count": 2,
+                "children": [{"type": "COURSE_SET", "courses": ["14:540:100"]}],
+            },
+        }
+    ]
+
+    res = client.post("/v1/catalog/snapshots:stage", json=payload)
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert detail["error_code"] == "STAGE_VALIDATION_ERROR"
+    errors = detail["errors"]
+    assert any(
+        err.get("field") == "program_requirements"
+        and err.get("code") == "INVALID_RULE_AST"
+        and "COUNT_MIN min_count cannot exceed number of children" in str(err.get("error"))
+        for err in errors
+    )
