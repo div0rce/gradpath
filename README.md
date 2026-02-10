@@ -101,12 +101,23 @@ NEXT_PUBLIC_API_BASE=http://localhost:8000 npm run dev
 
 ### Phase 4 SOC automation
 
+The WebReg automation adapter targets Rutgers SOC machine APIs under
+`https://classes.rutgers.edu/soc/api` (not browser UI hosts).
+If UI endpoints are used (`webreg.rutgers.edu`, `sims.rutgers.edu`, `dn.rutgers.edu`),
+the runner will fail closed on redirects.
+
 Run a single unattended SOC ingest job:
 
 ```bash
 cd backend
 source .venv/bin/activate
 python scripts/run_soc_ingest.py --campus NB --term-code 2025SU
+```
+
+Optional override:
+
+```bash
+WEBREG_SOC_URL=https://classes.rutgers.edu/soc/api python scripts/run_soc_ingest.py --campus NB --term-code 2025SU
 ```
 
 Run multiple jobs from config:
