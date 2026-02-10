@@ -178,7 +178,12 @@ def stage_from_soc(req: StageFromSocRequest, db: Session = Depends(get_db)) -> S
                 }
             )
 
-        latest_published_soc = get_latest_published_soc_slice_snapshot(db, baseline_term.id)
+        latest_published_soc = get_latest_published_soc_slice_snapshot(
+            db,
+            term_code=req.term_code,
+            campus=req.campus,
+            term_id_fallback=baseline_term.id,
+        )
         latest_checksum = None
         if latest_published_soc:
             latest_checksum = (latest_published_soc.source_metadata or {}).get("soc_slice_checksum")

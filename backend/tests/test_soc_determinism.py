@@ -28,8 +28,10 @@ def _seed_baseline_snapshot(client) -> tuple[str, str]:
 
 def test_latest_published_soc_slice_snapshot_order_is_deterministic(client):
     _ = client  # fixture initializes schema
-    term_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-    other_term_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    term_code = "2025SU"
+    campus = "NB"
+    other_term_code = "2025FA"
+    other_campus = "NWK"
     with SessionLocal() as db:
         snapshots = [
             CatalogSnapshot(
@@ -40,7 +42,7 @@ def test_latest_published_soc_slice_snapshot_order_is_deterministic(client):
                 synced_at=datetime(2026, 1, 1, 0, 0, 0),
                 created_at=datetime(2026, 1, 1, 0, 0, 0),
                 published_at=None,
-                source_metadata={"soc_slice": {"term_id": term_id}},
+                source_metadata={"soc_slice": {"term_code": term_code, "campus": campus}},
             ),
             CatalogSnapshot(
                 id="20000000-0000-0000-0000-000000000002",
@@ -50,7 +52,7 @@ def test_latest_published_soc_slice_snapshot_order_is_deterministic(client):
                 synced_at=datetime(2026, 1, 1, 0, 0, 1),
                 created_at=datetime(2026, 1, 1, 0, 0, 1),
                 published_at=None,
-                source_metadata={"soc_slice": {"term_id": term_id}},
+                source_metadata={"soc_slice": {"term_code": term_code, "campus": campus}},
             ),
             CatalogSnapshot(
                 id="30000000-0000-0000-0000-000000000003",
@@ -60,7 +62,7 @@ def test_latest_published_soc_slice_snapshot_order_is_deterministic(client):
                 synced_at=datetime(2026, 1, 1, 0, 0, 2),
                 created_at=datetime(2026, 1, 1, 0, 0, 2),
                 published_at=datetime(2026, 1, 1, 0, 0, 5),
-                source_metadata={"soc_slice": {"term_id": term_id}},
+                source_metadata={"soc_slice": {"term_code": term_code, "campus": campus}},
             ),
             CatalogSnapshot(
                 id="f0000000-0000-0000-0000-000000000004",
@@ -70,7 +72,7 @@ def test_latest_published_soc_slice_snapshot_order_is_deterministic(client):
                 synced_at=datetime(2026, 1, 1, 0, 0, 2),
                 created_at=datetime(2026, 1, 1, 0, 0, 2),
                 published_at=datetime(2026, 1, 1, 0, 0, 5),
-                source_metadata={"soc_slice": {"term_id": term_id}},
+                source_metadata={"soc_slice": {"term_code": term_code, "campus": campus}},
             ),
             CatalogSnapshot(
                 id="90000000-0000-0000-0000-000000000009",
@@ -80,13 +82,13 @@ def test_latest_published_soc_slice_snapshot_order_is_deterministic(client):
                 synced_at=datetime(2026, 1, 1, 0, 0, 9),
                 created_at=datetime(2026, 1, 1, 0, 0, 9),
                 published_at=datetime(2026, 1, 1, 0, 0, 9),
-                source_metadata={"soc_slice": {"term_id": other_term_id}},
+                source_metadata={"soc_slice": {"term_code": other_term_code, "campus": other_campus}},
             ),
         ]
         for row in snapshots:
             db.add(row)
         db.commit()
-        picked = get_latest_published_soc_slice_snapshot(db, term_id)
+        picked = get_latest_published_soc_slice_snapshot(db, term_code=term_code, campus=campus)
         assert picked is not None
         assert picked.id == "f0000000-0000-0000-0000-000000000004"
 
@@ -273,3 +275,45 @@ def test_stage_from_soc_accepts_legacy_candidate_payload(client):
         },
     )
     assert res.status_code == 200, res.text
+
+
+def test_stage_from_soc_noop_uses_stable_slice_identity_after_promotion(client):
+    _snapshot_id, _term_id = _seed_baseline_snapshot(client)
+    raw_payload = {
+        "terms": [{"term_code": "2025SU", "campus": "NB"}],
+        "offerings": [],
+        "metadata": {"parse_warnings": [], "fetched_at": "2026-02-09T00:00:00Z"},
+    }
+
+    first = client.post(
+        "/v1/catalog/snapshots:stage-from-soc",
+        json={
+            "term_code": "2025SU",
+            "campus": "NB",
+            "dry_run": False,
+            "ingest_source": "CSP_PUBLIC",
+            "raw_payload": raw_payload,
+        },
+    )
+    assert first.status_code == 200, first.text
+    first_body = first.json()
+    assert first_body["result"]["noop"] is False
+    first_snapshot_id = first_body["snapshot"]["snapshot_id"]
+
+    promote = client.post(f"/v1/catalog/snapshots/{first_snapshot_id}:promote")
+    assert promote.status_code == 200, promote.text
+
+    second = client.post(
+        "/v1/catalog/snapshots:stage-from-soc",
+        json={
+            "term_code": "2025SU",
+            "campus": "NB",
+            "dry_run": False,
+            "ingest_source": "CSP_PUBLIC",
+            "raw_payload": raw_payload,
+        },
+    )
+    assert second.status_code == 200, second.text
+    second_body = second.json()
+    assert second_body["result"]["noop"] is True
+    assert second_body["snapshot"]["snapshot_id"] == first_snapshot_id

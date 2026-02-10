@@ -354,11 +354,21 @@ def get_active_published_snapshot(db: Session) -> CatalogSnapshot:
     return active
 
 
-def get_latest_published_soc_slice_snapshot(db: Session, term_id: str) -> CatalogSnapshot | None:
-    term_id_str = str(term_id).lower()
+def get_latest_published_soc_slice_snapshot(
+    db: Session,
+    *,
+    term_code: str,
+    campus: str,
+    term_id_fallback: str | None = None,
+) -> CatalogSnapshot | None:
+    term_code_str = str(term_code)
+    campus_str = str(campus)
+    term_id_fallback_str = str(term_id_fallback).lower() if term_id_fallback is not None else None
     # Preferred query shape for Postgres JSONB indexing:
-    # source_metadata->'soc_slice'->>'term_id' = :term_id
+    # source_metadata->'soc_slice'->>'term_code' = :term_code and
+    # source_metadata->'soc_slice'->>'campus' = :campus
     # Order + JSONB path are shared between dry-run and stage; do not fork.
+    # Noop slice identity is (term_code, campus) because term_id is snapshot-scoped.
     base_stmt = (
         select(CatalogSnapshot)
         .where(
@@ -372,15 +382,32 @@ def get_latest_published_soc_slice_snapshot(db: Session, term_id: str) -> Catalo
         )
     )
     try:
-        stmt = base_stmt.where(CatalogSnapshot.source_metadata["soc_slice"]["term_id"].as_string() == term_id_str)
-        return db.execute(stmt).scalars().first()
+        stmt = base_stmt.where(
+            CatalogSnapshot.source_metadata["soc_slice"]["term_code"].as_string() == term_code_str,
+            CatalogSnapshot.source_metadata["soc_slice"]["campus"].as_string() == campus_str,
+        )
+        matched = db.execute(stmt).scalars().first()
+        if matched:
+            return matched
+        if term_id_fallback_str is None:
+            return None
+        fallback_stmt = base_stmt.where(
+            CatalogSnapshot.source_metadata["soc_slice"]["term_id"].as_string() == term_id_fallback_str
+        )
+        return db.execute(fallback_stmt).scalars().first()
     except Exception:
         rows = db.execute(base_stmt).scalars().all()
         for row in rows:
             metadata = row.source_metadata or {}
             soc_slice = metadata.get("soc_slice") or {}
-            if str(soc_slice.get("term_id", "")).lower() == term_id_str:
+            if str(soc_slice.get("term_code", "")) == term_code_str and str(soc_slice.get("campus", "")) == campus_str:
                 return row
+        if term_id_fallback_str is not None:
+            for row in rows:
+                metadata = row.source_metadata or {}
+                soc_slice = metadata.get("soc_slice") or {}
+                if str(soc_slice.get("term_id", "")).lower() == term_id_fallback_str:
+                    return row
     return None
 
 
