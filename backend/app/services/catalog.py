@@ -24,6 +24,10 @@ from app.models import (
     Term,
 )
 from app.schemas import StageSnapshotRequest
+from app.services.degree_dsl_engine import (
+    infer_requirement_rule_schema_version,
+    validate_requirement_rule_compat,
+)
 from app.services.rule_engine import validate_rule_schema
 from app.services.soc_checksum import SocResolvedOffering
 
@@ -166,7 +170,7 @@ def stage_snapshot(db: Session, payload: StageSnapshotRequest) -> CatalogSnapsho
                 )
                 continue
             try:
-                validate_rule_schema(rule)
+                validate_requirement_rule_compat(rule)
             except Exception as exc:
                 errors.append(
                     {
@@ -287,7 +291,7 @@ def stage_snapshot(db: Session, payload: StageSnapshotRequest) -> CatalogSnapsho
                     order_index=int(req.get("orderIndex", idx)),
                     label=label,
                     rule=rule,
-                    rule_schema_version=1,
+                    rule_schema_version=infer_requirement_rule_schema_version(rule),
                 )
             )
 

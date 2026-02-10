@@ -100,6 +100,9 @@ class RequirementSet(Base):
 
 class RequirementNode(Base):
     __tablename__ = "requirement_node"
+    # Requirement nodes are program-version scoped and immutable per plan.
+    # DegreePlan rows reference requirement nodes by ID only.
+    # Do not copy/mutate requirement rules at plan level.
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     requirement_set_id: Mapped[str] = mapped_column(ForeignKey("requirement_set.id"), index=True)

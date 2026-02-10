@@ -16,7 +16,7 @@ from app.models import (
     PlanItem,
     RequirementNode,
 )
-from app.services.rule_engine import evaluate_rule
+from app.services.degree_dsl_engine import evaluate_degree_requirement_rule
 
 
 @dataclass
@@ -85,10 +85,10 @@ def recompute_audit(db: Session, *, plan_id: str) -> AuditOutcome:
     all_known = 0
 
     for node in nodes:
-        completed_eval = evaluate_rule(node.rule, completed_codes, allow_complex=False)
+        completed_eval = evaluate_degree_requirement_rule(node.rule, completed_codes)
         if not completed_eval.supported:
             status = AuditRequirementStatus.UNKNOWN
-            detail = {"reason": "UNSUPPORTED_RULE"}
+            detail = {"reason": "UNSUPPORTED_RULE", "explanations": completed_eval.explanation_codes}
             has_unsupported_rules = True
             unknown += 1
         elif completed_eval.satisfied:
@@ -97,20 +97,26 @@ def recompute_audit(db: Session, *, plan_id: str) -> AuditOutcome:
             satisfied += 1
             all_known += 1
         else:
-            union_eval = evaluate_rule(node.rule, completed_codes | pending_codes, allow_complex=False)
+            union_eval = evaluate_degree_requirement_rule(node.rule, completed_codes | pending_codes)
             if not union_eval.supported:
                 status = AuditRequirementStatus.UNKNOWN
-                detail = {"reason": "UNSUPPORTED_RULE"}
+                detail = {"reason": "UNSUPPORTED_RULE", "explanations": union_eval.explanation_codes}
                 has_unsupported_rules = True
                 unknown += 1
             elif union_eval.satisfied:
                 status = AuditRequirementStatus.PENDING
-                detail = {"missingCourses": completed_eval.missing_courses}
+                detail = {
+                    "missingCourses": completed_eval.missing_courses,
+                    "explanations": completed_eval.explanation_codes,
+                }
                 pending += 1
                 all_known += 1
             else:
                 status = AuditRequirementStatus.MISSING
-                detail = {"missingCourses": completed_eval.missing_courses}
+                detail = {
+                    "missingCourses": completed_eval.missing_courses,
+                    "explanations": completed_eval.explanation_codes,
+                }
                 missing += 1
                 all_known += 1
 
