@@ -69,7 +69,9 @@ def _attempt(
 
 def build_default_adapters() -> dict[str, Any]:
     return {
-        "WEBREG_PUBLIC": WebRegPullAdapter(base_url=os.getenv("WEBREG_SOC_URL", "https://webreg.rutgers.edu")),
+        "WEBREG_PUBLIC": WebRegPullAdapter(
+            base_url=os.getenv("WEBREG_SOC_URL", "https://classes.rutgers.edu/soc/api")
+        ),
         "CSP_PUBLIC": CspPullAdapter(base_url=os.getenv("CSP_SOC_URL", "https://sims.rutgers.edu/csp")),
         "DEGREE_NAVIGATOR_PUBLIC": DegreeNavigatorPullAdapter(
             base_url=os.getenv("DEGREE_NAV_SOC_URL", "https://dn.rutgers.edu")
