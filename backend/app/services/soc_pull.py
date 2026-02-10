@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 from hashlib import sha256
 import random
+import re
 import time
 from typing import Any, Callable
 from urllib.parse import urlencode
@@ -28,12 +29,10 @@ class SocFetchResult:
     completeness_reason: str | None = None
 
 
-Cursor = str | int
-
-
 @dataclass(frozen=True)
 class TermMappingResult:
-    term_identifier: str
+    soc_year: str
+    soc_term: str
     term_code: str
     campus: str
 
@@ -41,10 +40,12 @@ class TermMappingResult:
 @dataclass(frozen=True)
 class PagePayload:
     url: str
-    payload: dict[str, Any]
+    payload: Any
 
 
 OfferingRow = dict[str, Any]
+WEBREG_TERM_CODE_RE = re.compile(r"^(\d{4})(SP|SU|FA|WI)$")
+WEBREG_NUMERIC_TERM_CODE_RE = re.compile(r"^([0179])(\d{4})$")
 
 WEBREG_RETRY_ATTEMPTS = 5
 WEBREG_BACKOFF_BASE_S = 0.5
@@ -247,7 +248,7 @@ def canonicalize_soc_raw_payload(
     return canonical_payload
 
 
-FetchJsonFn = Callable[[str, dict[str, str], dict[str, str], float], dict[str, Any]]
+FetchJsonFn = Callable[[str, dict[str, str], dict[str, str], float], Any]
 
 
 def default_json_fetcher(
@@ -255,7 +256,7 @@ def default_json_fetcher(
     params: dict[str, str],
     headers: dict[str, str],
     timeout_s: float,
-) -> dict[str, Any]:
+) -> Any:
     hard_cap = min(float(timeout_s), WEBREG_REQUEST_TIMEOUT_S)
     timeout = httpx.Timeout(
         timeout=hard_cap,
@@ -301,6 +302,8 @@ class BasePullAdapter(ABC):
             {"User-Agent": self.user_agent},
             self.timeout_s,
         )
+        if not isinstance(upstream, dict):
+            raise ValueError({"error_code": "SOC_FETCH_FAILED", "message": "payload must be an object"})
 
         payload_obj = upstream.get("payload")
         if payload_obj is None:
@@ -359,14 +362,53 @@ class BasePullAdapter(ABC):
 class WebRegPullAdapter(BasePullAdapter):
     source_id = "WEBREG_PUBLIC"
 
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        fetch_json: FetchJsonFn | None = None,
+        timeout_s: float = 20.0,
+        user_agent: str = "GradPath-SOC-Ingest/1.0",
+    ):
+        super().__init__(
+            base_url=base_url,
+            fetch_json=fetch_json or self._fetch_json_allow_list,
+            timeout_s=timeout_s,
+            user_agent=user_agent,
+        )
+
     def build_params(self, *, term_code: str, campus: str) -> dict[str, str]:
         return {"campus": campus, "term_code": term_code}
+
+    def _fetch_json_allow_list(
+        self,
+        url: str,
+        params: dict[str, str],
+        headers: dict[str, str],
+        timeout_s: float,
+    ) -> Any:
+        hard_cap = min(float(timeout_s), WEBREG_REQUEST_TIMEOUT_S)
+        timeout = httpx.Timeout(
+            timeout=hard_cap,
+            connect=min(WEBREG_CONNECT_TIMEOUT_S, hard_cap),
+            read=min(WEBREG_READ_TIMEOUT_S, hard_cap),
+            write=hard_cap,
+            pool=min(WEBREG_CONNECT_TIMEOUT_S, hard_cap),
+        )
+        response = httpx.get(url, params=params, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, (dict, list)):
+            raise ValueError({"error_code": "SOC_FETCH_FAILED", "message": "Upstream JSON payload must be an object or list"})
+        return payload
 
     def _build_source_url(self, url: str, params: dict[str, str]) -> str:
         query = urlencode(sorted(params.items()))
         return f"{url}?{query}" if query else url
 
-    def _extract_upstream_fetched_at(self, payload: dict[str, Any]) -> str | None:
+    def _extract_upstream_fetched_at(self, payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
         metadata = payload.get("metadata")
         if isinstance(metadata, dict):
             fetched_at = metadata.get("fetched_at")
@@ -377,18 +419,14 @@ class WebRegPullAdapter(BasePullAdapter):
             return fetched_at
         return None
 
-    def _extract_term_rows(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        for key in ("terms", "results", "data"):
-            rows = payload.get(key)
-            if isinstance(rows, list):
-                return [row for row in rows if isinstance(row, dict)]
-        return []
-
-    def _extract_offering_rows(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        for key in ("offerings", "results", "data"):
-            rows = payload.get(key)
-            if isinstance(rows, list):
-                return [row for row in rows if isinstance(row, dict)]
+    def _extract_course_rows(self, payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, dict)]
+        if isinstance(payload, dict):
+            for key in ("courses", "results", "data"):
+                rows = payload.get(key)
+                if isinstance(rows, list):
+                    return [row for row in rows if isinstance(row, dict)]
         return []
 
     def _has_any_pagination_fields(self, payload: dict[str, Any]) -> bool:
@@ -406,6 +444,21 @@ class WebRegPullAdapter(BasePullAdapter):
             )
         )
 
+    def _map_term_code_to_soc_params(self, term_code: str) -> tuple[str, str] | None:
+        if not isinstance(term_code, str):
+            return None
+        normalized = term_code.strip().upper()
+        match = WEBREG_TERM_CODE_RE.match(normalized)
+        if match:
+            year, suffix = match.groups()
+            term_map = {"SP": "1", "SU": "7", "FA": "9"}
+            return (year, term_map[suffix]) if suffix in term_map else None
+        numeric_match = WEBREG_NUMERIC_TERM_CODE_RE.match(normalized)
+        if numeric_match:
+            term, year = numeric_match.groups()
+            return year, term
+        return None
+
     def _remaining_budget(self, started_monotonic: float) -> float:
         return WEBREG_SLICE_BUDGET_S - (time.monotonic() - started_monotonic)
 
@@ -415,8 +468,8 @@ class WebRegPullAdapter(BasePullAdapter):
         url: str,
         params: dict[str, str],
         started_monotonic: float,
-        request_cache: dict[tuple[str, tuple[tuple[str, str], ...]], dict[str, Any]],
-    ) -> dict[str, Any]:
+        request_cache: dict[tuple[str, tuple[tuple[str, str], ...]], Any],
+    ) -> Any:
         cache_key = (
             url,
             tuple(sorted((str(k), str(v)) for k, v in params.items())),
@@ -432,8 +485,6 @@ class WebRegPullAdapter(BasePullAdapter):
                 raise _SliceBudgetExceeded("Slice time budget exceeded")
             try:
                 payload = self.fetch_json(url, params, headers, WEBREG_REQUEST_TIMEOUT_S)
-                if not isinstance(payload, dict):
-                    raise ValueError({"error_code": "SOC_FETCH_FAILED", "message": "Upstream payload must be an object"})
                 request_cache[cache_key] = payload
                 return payload
             except Exception as exc:
@@ -472,160 +523,104 @@ class WebRegPullAdapter(BasePullAdapter):
         validate_soc_raw_payload(raw_payload)
         return SocFetchResult(raw_payload=raw_payload, is_complete=False, completeness_reason=completeness_reason)
 
-    def _webreg_discover_term(
-        self,
-        term_code: str,
-        campus: str,
-        *,
-        started_monotonic: float,
-        request_cache: dict[tuple[str, tuple[tuple[str, str], ...]], dict[str, Any]],
-    ) -> tuple[TermMappingResult | None, str, dict[str, Any]]:
-        terms_url = f"{self.base_url.rstrip('/')}/terms"
-        params = {"term_code": term_code, "campus": campus}
-        payload = self._request_json_with_resilience(
-            url=terms_url,
-            params=params,
-            started_monotonic=started_monotonic,
-            request_cache=request_cache,
-        )
-        source_url = self._build_source_url(terms_url, params)
-        rows = self._extract_term_rows(payload)
-        matches: list[TermMappingResult] = []
-        for row in rows:
-            row_term = str(row.get("term_code") or row.get("code") or "")
-            row_campus = str(row.get("campus") or "")
-            if row_term != term_code or row_campus != campus:
-                continue
-            term_identifier = str(row.get("id") or row.get("term_id") or row_term)
-            if not term_identifier:
-                continue
-            matches.append(
-                TermMappingResult(
-                    term_identifier=term_identifier,
-                    term_code=term_code,
-                    campus=campus,
-                )
-            )
-        if len(matches) != 1:
-            return None, source_url, payload
-        return matches[0], source_url, payload
-
-    def _webreg_fetch_page(
+    def _webreg_fetch_courses(
         self,
         term_mapping: TermMappingResult,
-        cursor_or_offset: Cursor | None,
         *,
         started_monotonic: float,
-        request_cache: dict[tuple[str, tuple[tuple[str, str], ...]], dict[str, Any]],
+        request_cache: dict[tuple[str, tuple[tuple[str, str], ...]], Any],
     ) -> PagePayload:
-        page_url = f"{self.base_url.rstrip('/')}/offerings"
+        courses_url = f"{self.base_url.rstrip('/')}/courses.json"
         params = {
-            "term_code": term_mapping.term_code,
+            "year": term_mapping.soc_year,
+            "term": term_mapping.soc_term,
             "campus": term_mapping.campus,
-            "term_id": term_mapping.term_identifier,
         }
-        if cursor_or_offset is not None:
-            if isinstance(cursor_or_offset, int):
-                params["offset"] = str(cursor_or_offset)
-            else:
-                params["cursor"] = str(cursor_or_offset)
         payload = self._request_json_with_resilience(
-            url=page_url,
+            url=courses_url,
             params=params,
             started_monotonic=started_monotonic,
             request_cache=request_cache,
         )
-        return PagePayload(url=self._build_source_url(page_url, params), payload=payload)
+        return PagePayload(url=self._build_source_url(courses_url, params), payload=payload)
 
-    def _webreg_parse_page(
-        self,
-        page_payload: PagePayload,
-        *,
-        term_code: str,
-        campus: str,
-    ) -> tuple[list[OfferingRow], list[str], bool, Cursor | None]:
-        rows = self._extract_offering_rows(page_payload.payload)
-        warnings: list[str] = []
-        offerings: list[OfferingRow] = []
-        for row in rows:
-            course_code = row.get("course_code") or row.get("code")
-            if not isinstance(course_code, str) or not course_code.strip():
-                warnings.append("Skipping offering row with missing course_code")
-                continue
+    def _determine_payload_completeness_reason(self, payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
 
-            offered_raw = row.get("offered")
-            offered_value: bool
-            if isinstance(offered_raw, bool):
-                offered_value = offered_raw
-            elif isinstance(offered_raw, str):
-                lowered = offered_raw.strip().lower()
-                if lowered in {"true", "1", "yes", "y"}:
-                    offered_value = True
-                elif lowered in {"false", "0", "no", "n"}:
-                    offered_value = False
-                else:
-                    warnings.append(f"Skipping offering row with unsupported offered value for {course_code}")
-                    continue
-            elif isinstance(offered_raw, int):
-                if offered_raw in (0, 1):
-                    offered_value = bool(offered_raw)
-                else:
-                    warnings.append(f"Skipping offering row with unsupported offered value for {course_code}")
-                    continue
-            else:
-                warnings.append(f"Skipping offering row with missing offered value for {course_code}")
-                continue
-
-            offerings.append(
-                {
-                    "term_code": term_code,
-                    "campus": campus,
-                    "course_code": course_code.strip(),
-                    "offered": offered_value,
-                }
-            )
-
-        payload = page_payload.payload
-        truncation_signal = any(
+        if any(
             bool(payload.get(key))
             for key in ("truncated", "is_truncated", "limit_reached", "partial", "truncated_result")
-        )
+        ):
+            return "TRUNCATED_RESULT"
+        if payload.get("incomplete") is True or payload.get("complete") is False:
+            return "UPSTREAM_INCOMPLETE"
 
-        next_cursor: Cursor | None = None
-        if isinstance(payload.get("next_cursor"), (str, int)):
-            next_cursor = payload.get("next_cursor")
-        elif isinstance(payload.get("next"), (str, int)):
-            next_cursor = payload.get("next")
-        elif isinstance(payload.get("cursor_next"), (str, int)):
-            next_cursor = payload.get("cursor_next")
-        elif isinstance(payload.get("next_offset"), int):
-            next_cursor = int(payload["next_offset"])
-        elif isinstance(payload.get("offset"), int) and isinstance(payload.get("limit"), int):
-            if payload.get("has_more") is True:
-                next_cursor = int(payload["offset"]) + int(payload["limit"])
+        if not self._has_any_pagination_fields(payload):
+            return None
 
-        parse_warnings = payload.get("parse_warnings")
-        if isinstance(parse_warnings, list):
-            warnings.extend(str(x) for x in parse_warnings)
+        has_more = payload.get("has_more")
+        if has_more is True:
+            return "PAGINATION_UNCERTAIN"
+        if isinstance(has_more, bool) and has_more is False:
+            return None
 
-        return offerings, warnings, truncation_signal, next_cursor
+        if any(payload.get(key) is not None for key in ("next_cursor", "next", "cursor_next", "next_offset")):
+            return "PAGINATION_UNCERTAIN"
+
+        total = payload.get("total")
+        offset = payload.get("offset")
+        limit = payload.get("limit")
+        if isinstance(total, int) and isinstance(offset, int) and isinstance(limit, int):
+            return None if offset + limit >= total else "PAGINATION_UNCERTAIN"
+
+        return "PAGINATION_UNCERTAIN"
+
+    def _resolve_course_key(self, course: dict[str, Any]) -> tuple[str | None, str | None]:
+        if "courseString" in course:
+            course_string = course.get("courseString")
+            if isinstance(course_string, str) and course_string != "":
+                return course_string, None
+            return None, "Course has invalid courseString"
+
+        subject = course.get("subject")
+        course_number = course.get("courseNumber")
+        if isinstance(subject, str) and subject != "" and isinstance(course_number, str) and course_number != "":
+            return f"{subject}:{course_number}", None
+        return None, "Course is missing identity fields (courseString or subject/courseNumber)"
 
     def fetch(self, *, term_code: str, campus: str) -> SocFetchResult:
         fetch_started_at = datetime.now(tz=timezone.utc).isoformat()
         started_monotonic = time.monotonic()
-        request_cache: dict[tuple[str, tuple[tuple[str, str], ...]], dict[str, Any]] = {}
+        request_cache: dict[tuple[str, tuple[tuple[str, str], ...]], Any] = {}
         source_urls: list[str] = []
         parse_warnings: list[str] = []
 
+        mapped = self._map_term_code_to_soc_params(term_code)
+        if mapped is None:
+            return self._incomplete_result(
+                term_code=term_code,
+                campus=campus,
+                fetched_at=fetch_started_at,
+                source_urls=source_urls,
+                parse_warnings=parse_warnings,
+                reason="AMBIGUOUS_TERM",
+            )
+        term_mapping = TermMappingResult(
+            soc_year=mapped[0],
+            soc_term=mapped[1],
+            term_code=term_code,
+            campus=campus,
+        )
+
         try:
-            term_mapping, discovery_url, discovery_payload = self._webreg_discover_term(
-                term_code,
-                campus,
+            page = self._webreg_fetch_courses(
+                term_mapping,
                 started_monotonic=started_monotonic,
                 request_cache=request_cache,
             )
-            source_urls.append(discovery_url)
-            upstream_fetched_at = self._extract_upstream_fetched_at(discovery_payload) or fetch_started_at
+            source_urls.append(page.url)
+            upstream_fetched_at = self._extract_upstream_fetched_at(page.payload) or fetch_started_at
         except _SliceBudgetExceeded:
             return self._incomplete_result(
                 term_code=term_code,
@@ -636,105 +631,8 @@ class WebRegPullAdapter(BasePullAdapter):
                 reason="UNKNOWN_COMPLETENESS",
             )
 
-        if term_mapping is None:
-            return self._incomplete_result(
-                term_code=term_code,
-                campus=campus,
-                fetched_at=upstream_fetched_at,
-                source_urls=source_urls,
-                parse_warnings=parse_warnings,
-                reason="AMBIGUOUS_TERM",
-            )
-
-        cursor: Cursor | None = None
-        seen_cursors: set[tuple[str, str]] = set()
-        all_offerings: list[OfferingRow] = []
-        saw_truncation = False
-        saw_upstream_incomplete = False
-
-        while True:
-            try:
-                page = self._webreg_fetch_page(
-                    term_mapping,
-                    cursor,
-                    started_monotonic=started_monotonic,
-                    request_cache=request_cache,
-                )
-            except _SliceBudgetExceeded:
-                return self._incomplete_result(
-                    term_code=term_code,
-                    campus=campus,
-                    fetched_at=upstream_fetched_at,
-                    source_urls=source_urls,
-                    parse_warnings=parse_warnings,
-                    reason="UNKNOWN_COMPLETENESS",
-                )
-            source_urls.append(page.url)
-            if upstream_fetched_at == fetch_started_at:
-                maybe_upstream_ts = self._extract_upstream_fetched_at(page.payload)
-                if maybe_upstream_ts:
-                    upstream_fetched_at = maybe_upstream_ts
-
-            offerings, warnings, truncation_signal, next_cursor = self._webreg_parse_page(
-                page,
-                term_code=term_code,
-                campus=campus,
-            )
-            all_offerings.extend(offerings)
-            parse_warnings.extend(warnings)
-            saw_truncation = saw_truncation or truncation_signal
-
-            payload = page.payload
-            has_more = payload.get("has_more")
-            if payload.get("incomplete") is True or payload.get("complete") is False:
-                saw_upstream_incomplete = True
-
-            if next_cursor is not None:
-                cursor_key = (type(next_cursor).__name__, str(next_cursor))
-                if cursor_key in seen_cursors:
-                    return self._incomplete_result(
-                        term_code=term_code,
-                        campus=campus,
-                        fetched_at=upstream_fetched_at,
-                        source_urls=source_urls,
-                        parse_warnings=parse_warnings,
-                        reason="PAGINATION_UNCERTAIN",
-                    )
-                seen_cursors.add(cursor_key)
-                cursor = next_cursor
-                continue
-
-            if isinstance(has_more, bool):
-                if has_more:
-                    return self._incomplete_result(
-                        term_code=term_code,
-                        campus=campus,
-                        fetched_at=upstream_fetched_at,
-                        source_urls=source_urls,
-                        parse_warnings=parse_warnings,
-                        reason="PAGINATION_UNCERTAIN",
-                    )
-                break
-
-            total = payload.get("total")
-            offset = payload.get("offset")
-            limit = payload.get("limit")
-            if isinstance(total, int) and isinstance(offset, int) and isinstance(limit, int):
-                if offset + limit < total:
-                    return self._incomplete_result(
-                        term_code=term_code,
-                        campus=campus,
-                        fetched_at=upstream_fetched_at,
-                        source_urls=source_urls,
-                        parse_warnings=parse_warnings,
-                        reason="PAGINATION_UNCERTAIN",
-                    )
-                break
-
-            # No pagination fields at all implies a deterministic single-page response.
-            if not self._has_any_pagination_fields(payload):
-                break
-
+        if not isinstance(page.payload, (dict, list)):
+            parse_warnings.append("Upstream courses payload must be a list or object containing list rows")
             return self._incomplete_result(
                 term_code=term_code,
                 campus=campus,
@@ -743,27 +641,81 @@ class WebRegPullAdapter(BasePullAdapter):
                 parse_warnings=parse_warnings,
                 reason="UNKNOWN_COMPLETENESS",
             )
+        if isinstance(page.payload, dict):
+            payload_reason = self._determine_payload_completeness_reason(page.payload)
+            if payload_reason is not None:
+                return self._incomplete_result(
+                    term_code=term_code,
+                    campus=campus,
+                    fetched_at=upstream_fetched_at,
+                    source_urls=source_urls,
+                    parse_warnings=parse_warnings,
+                    reason=payload_reason,
+                )
 
-        if saw_truncation:
-            return self._incomplete_result(
-                term_code=term_code,
-                campus=campus,
-                fetched_at=upstream_fetched_at,
-                source_urls=source_urls,
-                parse_warnings=parse_warnings,
-                reason="TRUNCATED_RESULT",
-            )
+        courses = self._extract_course_rows(page.payload)
 
-        if saw_upstream_incomplete:
-            return self._incomplete_result(
-                term_code=term_code,
-                campus=campus,
-                fetched_at=upstream_fetched_at,
-                source_urls=source_urls,
-                parse_warnings=parse_warnings,
-                reason="UPSTREAM_INCOMPLETE",
-            )
+        offered_by_course: dict[str, bool] = {}
+        for course in courses:
+            course_key, course_key_error = self._resolve_course_key(course)
+            if course_key is None:
+                parse_warnings.append(course_key_error or "Course identity could not be resolved")
+                return self._incomplete_result(
+                    term_code=term_code,
+                    campus=campus,
+                    fetched_at=upstream_fetched_at,
+                    source_urls=source_urls,
+                    parse_warnings=parse_warnings,
+                    reason="UNKNOWN_COMPLETENESS",
+                )
 
+            sections = course.get("sections")
+            if not isinstance(sections, list):
+                parse_warnings.append(f"Course {course_key} has invalid sections payload")
+                return self._incomplete_result(
+                    term_code=term_code,
+                    campus=campus,
+                    fetched_at=upstream_fetched_at,
+                    source_urls=source_urls,
+                    parse_warnings=parse_warnings,
+                    reason="UNKNOWN_COMPLETENESS",
+                )
+
+            has_open_section = offered_by_course.get(course_key, False)
+            for section in sections:
+                if not isinstance(section, dict):
+                    parse_warnings.append(f"Course {course_key} has non-object section rows")
+                    return self._incomplete_result(
+                        term_code=term_code,
+                        campus=campus,
+                        fetched_at=upstream_fetched_at,
+                        source_urls=source_urls,
+                        parse_warnings=parse_warnings,
+                        reason="UNKNOWN_COMPLETENESS",
+                    )
+                open_status = section.get("openStatus")
+                if not isinstance(open_status, bool):
+                    parse_warnings.append(f"Course {course_key} has non-bool openStatus")
+                    return self._incomplete_result(
+                        term_code=term_code,
+                        campus=campus,
+                        fetched_at=upstream_fetched_at,
+                        source_urls=source_urls,
+                        parse_warnings=parse_warnings,
+                        reason="UNKNOWN_COMPLETENESS",
+                    )
+                has_open_section = has_open_section or open_status
+            offered_by_course[course_key] = has_open_section
+
+        all_offerings: list[OfferingRow] = [
+            {
+                "term_code": term_code,
+                "campus": campus,
+                "course_code": course_code,
+                "offered": offered,
+            }
+            for course_code, offered in sorted(offered_by_course.items(), key=lambda x: x[0])
+        ]
         raw_payload = {
             "terms": [{"term_code": term_code, "campus": campus}],
             "offerings": all_offerings,
