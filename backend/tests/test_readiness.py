@@ -52,7 +52,7 @@ def test_ready_blocked_with_deterministic_blockers(client, user_id):
     detail = ready.json()["detail"]
     assert detail["error_code"] == "PLAN_NOT_READY"
     blocker_codes = [b["code"] for b in detail["blockers"]]
-    assert blocker_codes == ["INVALID_ITEMS", "UNSUPPORTED_RULES", "MISSING_REQUIREMENTS", "UNKNOWN_REQUIREMENTS"]
+    assert blocker_codes == ["INVALID_ITEMS", "MISSING_REQUIREMENTS"]
 
 
 def test_ready_to_draft_on_item_mutation(client, user_id):

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from sqlalchemy import select
+
+from app.db import SessionLocal
+from app.models import RequirementNode
 from tests.helpers import stage_payload
 
 
@@ -79,3 +83,56 @@ def test_stage_from_csv_returns_row_aware_parse_errors(client, tmp_path: Path):
     assert detail["error_code"] == "CSV_PARSE_ERROR"
     assert any(err["file"] == "rules.csv" for err in detail["errors"])
     assert any(err["file"] == "program_requirements.csv" for err in detail["errors"])
+
+
+def test_stage_accepts_v2_requirement_rules_and_persists_schema_version(client):
+    payload = stage_payload()
+    payload["programs"][0]["requirements"] = [
+        {
+            "orderIndex": 1,
+            "label": "Intro",
+            "rule": {"type": "COURSE_SET", "courses": ["14:540:100"]},
+        },
+        {
+            "orderIndex": 2,
+            "label": "Core Block",
+            "rule": {
+                "type": "ALL_OF",
+                "children": [
+                    {"type": "COURSE_SET", "courses": ["14:540:100"]},
+                    {"type": "COURSE_SET", "courses": ["14:540:200"]},
+                ],
+            },
+        },
+        {
+            "orderIndex": 3,
+            "label": "Pick One",
+            "rule": {
+                "type": "N_OF",
+                "n": 1,
+                "children": [
+                    {"type": "COURSE_SET", "courses": ["14:540:100"]},
+                    {"type": "COURSE_SET", "courses": ["14:540:300"]},
+                ],
+            },
+        },
+    ]
+    stage = client.post("/v1/catalog/snapshots:stage", json=payload)
+    assert stage.status_code == 200, stage.text
+    snapshot_id = stage.json()["snapshot_id"]
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(RequirementNode)
+            .where(RequirementNode.rule_schema_version == 2)
+            .order_by(RequirementNode.order_index.asc())
+        ).scalars().all()
+        assert len(rows) == 3
+        assert rows[0].label == "Intro"
+        assert rows[0].rule["type"] == "COURSE_SET"
+        assert rows[1].label == "Core Block"
+        assert rows[1].rule["type"] == "ALL_OF"
+        assert rows[2].label == "Pick One"
+        assert rows[2].rule["type"] == "N_OF"
+        assert rows[0].requirement_set_id == rows[1].requirement_set_id == rows[2].requirement_set_id
+        assert snapshot_id
