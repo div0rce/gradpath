@@ -65,6 +65,56 @@ def _finalize(
     )
 
 
+def _eval_min_required_children(
+    *,
+    min_required: int,
+    children: list[dict[str, Any]],
+    evidence_codes: set[str],
+) -> DegreeRuleEvalResult:
+    satisfied_count = 0
+    failed_children: list[DegreeRuleEvalResult] = []
+
+    for child in children:
+        child_result = _eval_v2(child, evidence_codes)
+        # Any unsupported child poisons cardinality satisfiability reasoning.
+        if not child_result.supported:
+            return _finalize(
+                supported=False,
+                satisfied=False,
+                missing_courses=[],
+                explanations=set(),
+            )
+        if child_result.satisfied:
+            satisfied_count += 1
+        else:
+            failed_children.append(child_result)
+
+    if satisfied_count >= min_required:
+        return _finalize(
+            supported=True,
+            satisfied=True,
+            missing_courses=[],
+            explanations={EXPLANATION_SATISFIED},
+        )
+
+    shortfall = min_required - satisfied_count
+    witness_children = failed_children[:shortfall]
+    missing_codes: set[str] = set()
+    child_explanations: set[str] = set()
+    for child_result in witness_children:
+        missing_codes.update(child_result.missing_courses)
+        child_explanations.update(child_result.explanation_codes)
+
+    child_explanations.add(EXPLANATION_INCOMPLETE)
+    child_explanations.discard(EXPLANATION_SATISFIED)
+    return _finalize(
+        supported=True,
+        satisfied=False,
+        missing_courses=list(missing_codes),
+        explanations=child_explanations,
+    )
+
+
 def infer_requirement_rule_schema_version(rule: dict[str, Any]) -> int:
     return 2 if isinstance(rule, dict) and isinstance(rule.get("type"), str) else 1
 
@@ -139,6 +189,21 @@ def _validate_degree_dsl_semantics_v2(node: dict[str, Any]) -> None:
         for child in children:
             if not isinstance(child, dict):
                 raise ValueError("N_OF children must be objects")
+            _validate_degree_dsl_semantics_v2(child)
+        return
+
+    if node_type == "COUNT_MIN":
+        min_count = node.get("min_count")
+        children = node.get("children")
+        if not isinstance(min_count, int) or min_count < 1:
+            raise ValueError("COUNT_MIN min_count must be an integer >= 1")
+        if not isinstance(children, list) or len(children) < 1:
+            raise ValueError("COUNT_MIN children must be a non-empty list")
+        if min_count > len(children):
+            raise ValueError("COUNT_MIN min_count cannot exceed number of children")
+        for child in children:
+            if not isinstance(child, dict):
+                raise ValueError("COUNT_MIN children must be objects")
             _validate_degree_dsl_semantics_v2(child)
         return
 
@@ -245,52 +310,18 @@ def _eval_v2(node: dict[str, Any], evidence_codes: set[str]) -> DegreeRuleEvalRe
         )
 
     if node_type == "N_OF":
-        n = int(node.get("n", 0))
-        children = node.get("children", [])
-        satisfied_children: list[DegreeRuleEvalResult] = []
-        failed_children: list[DegreeRuleEvalResult] = []
+        return _eval_min_required_children(
+            min_required=int(node.get("n", 0)),
+            children=node.get("children", []),
+            evidence_codes=evidence_codes,
+        )
 
-        for child in children:
-            child_result = _eval_v2(child, evidence_codes)
-            # Any unsupported child poisons N_OF satisfiability reasoning.
-            if not child_result.supported:
-                return _finalize(
-                    supported=False,
-                    satisfied=False,
-                    missing_courses=[],
-                    explanations=set(),
-                )
-            if child_result.satisfied:
-                satisfied_children.append(child_result)
-            else:
-                failed_children.append(child_result)
-
-        if len(satisfied_children) >= n:
-            return _finalize(
-                supported=True,
-                satisfied=True,
-                missing_courses=[],
-                explanations={EXPLANATION_SATISFIED},
-            )
-
-        # Deterministic witness definition:
-        # S = satisfied children in stored order, F = failed children in stored order.
-        # If |S| < n, witness set is first (n - |S|) failed children from F.
-        shortfall = n - len(satisfied_children)
-        witness_children = failed_children[:shortfall]
-        missing_codes: set[str] = set()
-        child_explanations: set[str] = set()
-        for child_result in witness_children:
-            missing_codes.update(child_result.missing_courses)
-            child_explanations.update(child_result.explanation_codes)
-
-        child_explanations.add(EXPLANATION_INCOMPLETE)
-        child_explanations.discard(EXPLANATION_SATISFIED)
-        return _finalize(
-            supported=True,
-            satisfied=False,
-            missing_courses=list(missing_codes),
-            explanations=child_explanations,
+    if node_type == "COUNT_MIN":
+        # COUNT_MIN is a semantic cardinality alias of N_OF witness mechanics.
+        return _eval_min_required_children(
+            min_required=int(node.get("min_count", 0)),
+            children=node.get("children", []),
+            evidence_codes=evidence_codes,
         )
 
     return _finalize(

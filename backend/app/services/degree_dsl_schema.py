@@ -53,6 +53,20 @@ DEGREE_DSL_SCHEMA_V2: dict[str, Any] = {
                     "required": ["type", "n", "children"],
                     "additionalProperties": False,
                 },
+                {
+                    "type": "object",
+                    "properties": {
+                        "type": {"const": "COUNT_MIN"},
+                        "min_count": {"type": "integer", "minimum": 1},
+                        "children": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {"$ref": "#/$defs/node"},
+                        },
+                    },
+                    "required": ["type", "min_count", "children"],
+                    "additionalProperties": False,
+                },
             ]
         }
     },
