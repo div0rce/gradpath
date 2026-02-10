@@ -177,3 +177,11 @@ python scripts/soc_status.py --jsonl var/soc_ingest_runs.jsonl --campus NB --ter
   - `SOCExportAdapter`
   - `SISAdapter`
 - `prisma/schema.prisma` is included as the canonical relational contract for production PostgreSQL migrations.
+
+## Phase Design Docs
+
+These links are design artifacts; implementation authority is defined by each document's status/gate statement.
+
+- Phase 5.2 merge-close note: `docs/phase-5.2-merge-note.md`
+- Phase 5.3 COUNT_MIN decision matrix: `docs/phase-5.3-count-min-decision-matrix.md`
+- Phase 5.3 COUNT_MIN draft spec (gated): `docs/phase-5.3-count-min-spec-draft.md`
