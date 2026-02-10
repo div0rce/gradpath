@@ -9,7 +9,11 @@ from sqlalchemy import select
 from app.db import SessionLocal
 from app.enums import CatalogSnapshotStatus, CatalogSource
 from app.models import CatalogSnapshot, Course, Term
-from app.services.catalog import get_latest_published_soc_slice_snapshot
+from app.services.catalog import (
+    get_latest_published_soc_slice_snapshot,
+    promote_snapshot,
+    stage_course_overlay_snapshot,
+)
 from app.services.soc_checksum import SocResolvedOffering, compute_soc_slice_checksum
 from tests.helpers import stage_payload_ready
 
@@ -317,3 +321,145 @@ def test_stage_from_soc_noop_uses_stable_slice_identity_after_promotion(client):
     second_body = second.json()
     assert second_body["result"]["noop"] is True
     assert second_body["snapshot"]["snapshot_id"] == first_snapshot_id
+
+
+def test_soc_resolution_metadata_is_deterministic(client):
+    _snapshot_id, _term_id = _seed_baseline_snapshot(client)
+    raw_payload = {
+        "terms": [{"term_code": "2025SU", "campus": "NB"}],
+        "offerings": [
+            {"term_code": "2025SU", "campus": "NB", "course_code": " 01:198:111 ", "offered": True},
+            {"term_code": "2025SU", "campus": "NB", "course_code": "01:198:111", "offered": True},
+            {"term_code": "2025SU", "campus": "NB", "course_code": "14 :332:221", "offered": True},
+            {"term_code": "2025SU", "campus": "NB", "course_code": "14:540:100", "offered": True},
+            {"term_code": "2025SU", "campus": "NB", "course_code": "14:540:200", "offered": False},
+        ],
+        "metadata": {"parse_warnings": [], "fetched_at": "2026-02-09T00:00:00Z"},
+    }
+
+    res = client.post(
+        "/v1/catalog/snapshots:stage-from-soc",
+        json={
+            "term_code": "2025SU",
+            "campus": "NB",
+            "dry_run": False,
+            "ingest_source": "WEBREG_PUBLIC",
+            "raw_payload": raw_payload,
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["result"]["unknown_courses_dropped_count"] == 2
+
+    snapshot_id = body["snapshot"]["snapshot_id"]
+    with SessionLocal() as db:
+        snap = db.execute(select(CatalogSnapshot).where(CatalogSnapshot.id == snapshot_id)).scalar_one()
+        md = snap.source_metadata or {}
+        soc_resolution = md.get("soc_resolution")
+
+    assert isinstance(soc_resolution, dict)
+    assert soc_resolution["total_rows_seen"] == 5
+    assert soc_resolution["offered_rows_seen"] == 4
+    assert soc_resolution["unknown_codes_count"] == 2
+    assert soc_resolution["raw_unknown_count"] == 3
+    assert soc_resolution["normalized_unknown_count"] == 2
+    assert soc_resolution["unknown_code_samples_raw"] == [" 01:198:111 ", "14 :332:221"]
+    assert soc_resolution["unknown_code_samples_normalized"] == ["01:198:111", "14:332:221"]
+    assert soc_resolution["unknown_code_sample_hash"] == sha256("01:198:111\n14:332:221".encode("utf-8")).hexdigest()
+
+
+def test_soc_unknowns_drop_after_course_bootstrap_and_remain_zero_after_promotion(client):
+    baseline_snapshot_id, _term_id = _seed_baseline_snapshot(client)
+    raw_payload = {
+        "terms": [{"term_code": "2025SU", "campus": "NB"}],
+        "offerings": [
+            {"term_code": "2025SU", "campus": "NB", "course_code": "01:198:111", "offered": True},
+        ],
+        "metadata": {"parse_warnings": [], "fetched_at": "2026-02-09T00:00:00Z"},
+    }
+
+    before = client.post(
+        "/v1/catalog/snapshots:stage-from-soc",
+        json={
+            "term_code": "2025SU",
+            "campus": "NB",
+            "dry_run": False,
+            "ingest_source": "WEBREG_PUBLIC",
+            "raw_payload": raw_payload,
+        },
+    )
+    assert before.status_code == 200, before.text
+    before_body = before.json()
+    assert before_body["result"]["unknown_courses_dropped_count"] == 1
+    checksum_before = before_body["result"]["checksum"]
+
+    with SessionLocal() as db:
+        baseline_snapshot = db.execute(
+            select(CatalogSnapshot).where(CatalogSnapshot.id == baseline_snapshot_id)
+        ).scalar_one()
+        bootstrap_staged = stage_course_overlay_snapshot(
+            db,
+            baseline_snapshot=baseline_snapshot,
+            missing_courses=[
+                {
+                    "code": "01:198:111",
+                    "title": "(bootstrap) Unknown Title",
+                    "credits": 0,
+                    "active": True,
+                    "category": None,
+                }
+            ],
+            source_metadata={"bootstrap_courses": {"inserted_count": 1}},
+        )
+        assert bootstrap_staged is not None
+        promote_snapshot(db, bootstrap_staged.id)
+
+    first_after = client.post(
+        "/v1/catalog/snapshots:stage-from-soc",
+        json={
+            "term_code": "2025SU",
+            "campus": "NB",
+            "dry_run": False,
+            "ingest_source": "WEBREG_PUBLIC",
+            "raw_payload": raw_payload,
+        },
+    )
+    assert first_after.status_code == 200, first_after.text
+    first_after_body = first_after.json()
+    assert first_after_body["result"]["unknown_courses_dropped_count"] == 0
+    assert first_after_body["result"]["checksum"] != checksum_before
+    assert first_after_body["result"]["noop"] is False
+    first_after_snapshot_id = first_after_body["snapshot"]["snapshot_id"]
+
+    promote = client.post(f"/v1/catalog/snapshots/{first_after_snapshot_id}:promote")
+    assert promote.status_code == 200, promote.text
+
+    second_after = client.post(
+        "/v1/catalog/snapshots:stage-from-soc",
+        json={
+            "term_code": "2025SU",
+            "campus": "NB",
+            "dry_run": False,
+            "ingest_source": "WEBREG_PUBLIC",
+            "raw_payload": raw_payload,
+        },
+    )
+    assert second_after.status_code == 200, second_after.text
+    second_after_body = second_after.json()
+    assert second_after_body["result"]["unknown_courses_dropped_count"] == 0
+    assert second_after_body["result"]["noop"] is True
+
+
+def test_stage_course_overlay_snapshot_returns_none_when_missing_set_is_empty(client):
+    baseline_snapshot_id, _term_id = _seed_baseline_snapshot(client)
+    with SessionLocal() as db:
+        baseline_snapshot = db.execute(
+            select(CatalogSnapshot).where(CatalogSnapshot.id == baseline_snapshot_id)
+        ).scalar_one()
+        staged = stage_course_overlay_snapshot(
+            db,
+            baseline_snapshot=baseline_snapshot,
+            missing_courses=[],
+            source_metadata={"bootstrap_courses": {"inserted_count": 0}},
+        )
+    assert staged is None

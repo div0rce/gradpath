@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 import re
 from typing import Any
 
@@ -443,40 +444,13 @@ def write_soc_metadata(
     return meta
 
 
-def stage_soc_overlay_snapshot(
+def _clone_snapshot_overlay_data(
     db: Session,
     *,
     baseline_snapshot: CatalogSnapshot,
-    baseline_term_id: str,
-    resolved_offerings: list[SocResolvedOffering],
-    checksum: str,
-    term_code: str,
-    campus: str,
-    ingest_source: str,
-    parse_warnings_count: int,
-    unknown_courses_dropped_count: int,
-    source_metadata: dict[str, Any] | None,
-) -> CatalogSnapshot:
-    new_snapshot = CatalogSnapshot(
-        source=CatalogSource.SOC_SCRAPE,
-        checksum=checksum,
-        status=CatalogSnapshotStatus.STAGED,
-        synced_at=datetime.utcnow(),
-        source_metadata=write_soc_metadata(
-            existing=source_metadata,
-            term_id=baseline_term_id,
-            term_code=term_code,
-            campus=campus,
-            checksum=checksum,
-            ingest_source=ingest_source,
-            parse_warnings_count=parse_warnings_count,
-            unknown_courses_dropped_count=unknown_courses_dropped_count,
-            zero_offerings=len(resolved_offerings) == 0,
-        ),
-    )
-    db.add(new_snapshot)
-    db.flush()
-
+    new_snapshot: CatalogSnapshot,
+    excluded_term_id: str | None = None,
+) -> tuple[dict[str, str], dict[str, str]]:
     baseline_courses = db.execute(
         select(Course).where(Course.catalog_snapshot_id == baseline_snapshot.id)
     ).scalars().all()
@@ -544,9 +518,8 @@ def stage_soc_overlay_snapshot(
             )
         )
 
-    target_new_term_id = term_id_map[baseline_term_id]
     for o in baseline_offerings:
-        if o.term_id == baseline_term_id:
+        if excluded_term_id and o.term_id == excluded_term_id:
             continue
         db.add(
             CourseOffering(
@@ -556,6 +529,135 @@ def stage_soc_overlay_snapshot(
                 offered=o.offered,
             )
         )
+
+    return course_id_map, term_id_map
+
+
+def _compute_bootstrap_overlay_checksum(*, baseline_checksum: str, inserted_normalized_codes: list[str]) -> str:
+    # Bootstrap overlays track catalog-coverage expansion, not SOC-slice canonical payloads.
+    # Keep checksum deterministic for identical baseline + inserted normalized identities.
+    payload = "\n".join([str(baseline_checksum), *sorted(inserted_normalized_codes)]).encode("utf-8")
+    return sha256(payload).hexdigest()
+
+
+def stage_course_overlay_snapshot(
+    db: Session,
+    *,
+    baseline_snapshot: CatalogSnapshot,
+    missing_courses: list[dict[str, Any]],
+    source_metadata: dict[str, Any] | None = None,
+) -> CatalogSnapshot | None:
+    baseline_courses = db.execute(
+        select(Course).where(Course.catalog_snapshot_id == baseline_snapshot.id)
+    ).scalars().all()
+    existing_normalized = {normalize_course_code(row.code)[0] for row in baseline_courses}
+
+    normalized_candidates: dict[str, dict[str, Any]] = {}
+    for row in missing_courses:
+        code_raw = str(row.get("code", ""))
+        if not code_raw:
+            raise ValueError({"error_code": "SOC_SCHEMA_VIOLATION", "message": "missing course code"})
+        normalized_code, _ = normalize_course_code(code_raw)
+        if normalized_code in existing_normalized:
+            continue
+        candidate = {
+            "code": code_raw,
+            "title": str(row.get("title") or "(bootstrap) Unknown Title"),
+            "credits": int(row.get("credits") or 0),
+            "active": bool(row.get("active", True)),
+            "category": row.get("category") if isinstance(row.get("category"), str) else None,
+            "normalized_code": normalized_code,
+        }
+        previous = normalized_candidates.get(normalized_code)
+        if previous is None or candidate["code"] < previous["code"]:
+            normalized_candidates[normalized_code] = candidate
+
+    if not normalized_candidates:
+        return None
+
+    inserted_normalized_codes = sorted(normalized_candidates.keys())
+    checksum = _compute_bootstrap_overlay_checksum(
+        baseline_checksum=baseline_snapshot.checksum,
+        inserted_normalized_codes=inserted_normalized_codes,
+    )
+    metadata = dict(source_metadata or {})
+
+    new_snapshot = CatalogSnapshot(
+        source=baseline_snapshot.source,
+        checksum=checksum,
+        status=CatalogSnapshotStatus.STAGED,
+        synced_at=datetime.utcnow(),
+        source_metadata=metadata,
+    )
+    db.add(new_snapshot)
+    db.flush()
+
+    _clone_snapshot_overlay_data(
+        db,
+        baseline_snapshot=baseline_snapshot,
+        new_snapshot=new_snapshot,
+        excluded_term_id=None,
+    )
+
+    for normalized_code in inserted_normalized_codes:
+        row = normalized_candidates[normalized_code]
+        db.add(
+            Course(
+                catalog_snapshot_id=new_snapshot.id,
+                code=row["code"],
+                title=row["title"],
+                credits=row["credits"],
+                active=row["active"],
+                category=row["category"],
+            )
+        )
+
+    db.commit()
+    db.refresh(new_snapshot)
+    return new_snapshot
+
+
+def stage_soc_overlay_snapshot(
+    db: Session,
+    *,
+    baseline_snapshot: CatalogSnapshot,
+    baseline_term_id: str,
+    resolved_offerings: list[SocResolvedOffering],
+    checksum: str,
+    term_code: str,
+    campus: str,
+    ingest_source: str,
+    parse_warnings_count: int,
+    unknown_courses_dropped_count: int,
+    source_metadata: dict[str, Any] | None,
+) -> CatalogSnapshot:
+    new_snapshot = CatalogSnapshot(
+        source=CatalogSource.SOC_SCRAPE,
+        checksum=checksum,
+        status=CatalogSnapshotStatus.STAGED,
+        synced_at=datetime.utcnow(),
+        source_metadata=write_soc_metadata(
+            existing=source_metadata,
+            term_id=baseline_term_id,
+            term_code=term_code,
+            campus=campus,
+            checksum=checksum,
+            ingest_source=ingest_source,
+            parse_warnings_count=parse_warnings_count,
+            unknown_courses_dropped_count=unknown_courses_dropped_count,
+            zero_offerings=len(resolved_offerings) == 0,
+        ),
+    )
+    db.add(new_snapshot)
+    db.flush()
+
+    course_id_map, term_id_map = _clone_snapshot_overlay_data(
+        db,
+        baseline_snapshot=baseline_snapshot,
+        new_snapshot=new_snapshot,
+        excluded_term_id=baseline_term_id,
+    )
+    target_new_term_id = term_id_map[baseline_term_id]
 
     inserted_course_ids: set[str] = set()
     for row in resolved_offerings:
