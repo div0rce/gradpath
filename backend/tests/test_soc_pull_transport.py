@@ -10,6 +10,7 @@ from app.services.soc_pull import (
     WEBREG_RETRY_ATTEMPTS,
     WebRegPullAdapter,
     _compute_backoff_delay,
+    default_json_fetcher,
 )
 
 
@@ -145,3 +146,25 @@ def test_slice_budget_exceeded_returns_schema_valid_unknown_completeness(
     assert isinstance(result.raw_payload["metadata"]["fetched_at"], str)
     assert result.raw_payload["metadata"]["fetched_at"].strip()
     assert len(fetcher.calls) == 0
+
+
+def test_default_json_fetcher_rejects_non_object_payload(monkeypatch: pytest.MonkeyPatch):
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return
+
+        def json(self) -> list[dict[str, str]]:
+            return [{"unexpected": "list"}]
+
+    monkeypatch.setattr("app.services.soc_pull.httpx.get", lambda *args, **kwargs: _FakeResponse())
+
+    with pytest.raises(ValueError) as exc_info:
+        default_json_fetcher(
+            "https://example.test/courses.json",
+            {"year": "2025", "term": "7", "campus": "NB"},
+            {"User-Agent": "test"},
+            10.0,
+        )
+
+    detail = exc_info.value.args[0]
+    assert detail["error_code"] == "SOC_FETCH_FAILED"
