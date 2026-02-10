@@ -46,3 +46,8 @@ Scoring: `1` (poor) to `5` (best).
 
 ## Implementation Gate
 `COUNT_MIN` implementation is blocked until the Phase 5.3 spec references this decision and locks exact evaluator/test invariants.
+
+## Merge Note Statement
+- `COUNT_MIN introduced as semantic alias of N_OF; no new evaluation model.`
+- No new explanation codes introduced.
+- No optimization or backtracking behavior introduced.
