@@ -57,7 +57,20 @@ pip install -r requirements.txt
 ```bash
 cd backend
 source .venv/bin/activate
+# Optional but recommended for deterministic local DB target:
+export DATABASE_URL="sqlite:////Users/nasr/repos/gradpath/backend/gradpath.db"
 uvicorn app.main:app --reload --port 8000
+```
+
+`DATABASE_URL` must be set before starting the backend process.
+If you change `DATABASE_URL`, restart the backend process (engine/sessionmaker are cached per process).
+
+Verify the effective DB URL:
+
+```bash
+cd backend
+source .venv/bin/activate
+python -c "from app.db import get_engine; print(get_engine().url)"
 ```
 
 Health check:
@@ -163,8 +176,8 @@ python scripts/soc_status.py --jsonl var/soc_ingest_runs.jsonl --campus NB --ter
   rm -f gradpath.db
   source .venv/bin/activate
   python - <<'PY'
-  from app.db import Base, engine
-  Base.metadata.create_all(bind=engine)
+  from app.db import Base, get_engine
+  Base.metadata.create_all(bind=get_engine())
   print("fresh db ready")
   PY
   ```
@@ -172,6 +185,7 @@ python scripts/soc_status.py --jsonl var/soc_ingest_runs.jsonl --campus NB --ter
 ## Notes
 
 - Default backend DB is SQLite (`backend/gradpath.db`) for local development.
+- Relative SQLite URL defaults (`sqlite:///./gradpath.db`) are working-directory dependent.
 - The ingest adapter interface exists (`RegistrarFeedAdapter`) with placeholders for:
   - `DepartmentCSVAdapter`
   - `SOCExportAdapter`
