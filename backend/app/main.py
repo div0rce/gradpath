@@ -2,12 +2,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import catalog, plans
-from app.core.config import settings
-from app.db import Base, engine
+from app.core.config import get_settings
+from app.db import Base, get_engine
 
-Base.metadata.create_all(bind=engine)
+Base.metadata.create_all(bind=get_engine())
 
-app = FastAPI(title=settings.app_name)
+app = FastAPI(title=get_settings().app_name)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
