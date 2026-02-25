@@ -57,9 +57,16 @@ pip install -r requirements.txt
 ```bash
 cd backend
 source .venv/bin/activate
-# Optional but recommended for deterministic local DB target:
-export DATABASE_URL="sqlite:////Users/nasr/repos/gradpath/backend/gradpath.db"
-uvicorn app.main:app --reload --port 8000
+scripts/dev_start.sh
+```
+
+Optional override for deterministic local DB target:
+
+```bash
+cd backend
+source .venv/bin/activate
+export DATABASE_URL="sqlite:////ABSOLUTE/PATH/TO/backend/gradpath.db"
+scripts/dev_start.sh
 ```
 
 `DATABASE_URL` must be set before starting the backend process.
