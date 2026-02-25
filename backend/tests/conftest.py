@@ -23,7 +23,7 @@ def _reset_settings_and_db_caches() -> None:
 
 
 @pytest.fixture(autouse=True)
-def reset_db() -> None:
+def reset_db(_reset_settings_and_db_caches) -> None:
     Base.metadata.drop_all(bind=get_engine())
     Base.metadata.create_all(bind=get_engine())
 
