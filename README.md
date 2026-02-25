@@ -184,7 +184,7 @@ python scripts/soc_status.py --jsonl var/soc_ingest_runs.jsonl --campus NB --ter
 
 ## Notes
 
-- Default backend DB is SQLite (`backend/gradpath.db`) for local development.
+- Default backend DB is SQLite (`sqlite:///./gradpath.db`) for local development.
 - Relative SQLite URL defaults (`sqlite:///./gradpath.db`) are working-directory dependent.
 - The ingest adapter interface exists (`RegistrarFeedAdapter`) with placeholders for:
   - `DepartmentCSVAdapter`
